@@ -380,10 +380,12 @@ export default function Index() {
                 onChange={setSearch}
                 onKeyDown={(e) => {
                   if (e.key === "Enter")
-                    navigate(buildUrl({ q: search.trim() || "", page: 1 }));
+                    // navigate(buildUrl({ q: search.trim() || "", page: 1 }));
+                  navigate(`?q=${encodeURIComponent(search.trim() || "")}`);
                 }}
                 clearButton
-                onClearButtonClick={() => navigate(buildUrl({ q: "", page: 1 }))}
+                // onClearButtonClick={() => navigate(buildUrl({ q: "", page: 1 }))}
+                onClearButtonClick={() => navigate(`.`)}
               />
             </div>
 
@@ -586,7 +588,7 @@ export default function Index() {
 
         <br />
 
-        <InlineStack align="space-between" gap="300">
+       <InlineStack align="space-between" gap="300">
   <Button
     disabled={!pageInfo?.hasPreviousPage}
     onClick={() => {
@@ -594,12 +596,10 @@ export default function Index() {
 
       if (!products.length) return;
 
-      navigate(
-        buildUrl({
-          q,
-          before: products[0].cursor,
-        })
-      );
+      window.location.href = buildUrl({
+        q,
+        before: products[0].cursor,
+      });
     }}
   >
     Previous
@@ -613,12 +613,10 @@ export default function Index() {
 
       if (!products.length) return;
 
-      navigate(
-        buildUrl({
-          q,
-          after: products[products.length - 1].cursor,
-        })
-      );
+      window.location.href = buildUrl({
+        q,
+        after: products[products.length - 1].cursor,
+      });
     }}
   >
     Next
