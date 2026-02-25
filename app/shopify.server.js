@@ -7,10 +7,6 @@ import {
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server.js";
 
-import { sessionStorage } from "./shopify.server";
-
-
-
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
@@ -29,8 +25,6 @@ const shopify = shopifyApp({
     : {}),
 });
 
-const sessions = await prisma.session.findMany();
-console.log("ALL SESSIONS:", sessions);
 
 export default shopify;
 export const apiVersion = ApiVersion.January25;
