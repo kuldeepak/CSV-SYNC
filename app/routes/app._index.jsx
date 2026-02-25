@@ -305,6 +305,8 @@ export default function Index() {
   const navigate = useNavigate();
   const submit = useSubmit();
 
+
+  
   // ✅ cursor history for Previous button (stable)
   const [cursorStack, setCursorStack] = useState([]);
 
@@ -604,37 +606,49 @@ export default function Index() {
 
         {/* PAGINATION (Stable) */}
         <InlineStack align="space-between" gap="300">
-          <Button
-            disabled={cursorStack.length === 0}
-            onClick={() => {
-              cancelEdit();
-              if (cursorStack.length === 0) return;
+         <Button
+  disabled={cursorStack.length === 0}
+  onClick={() => {
+    cancelEdit();
 
-              const prevAfter = cursorStack[cursorStack.length - 1];
-              setCursorStack((s) => s.slice(0, -1));
-              navigate(buildUrl({ q, after: prevAfter }));
-            }}
-          >
-            Previous
-          </Button>
+    if (cursorStack.length === 0) return;
 
-          <Button
-            disabled={!pageInfo?.hasNextPage || products.length === 0}
-            variant="primary"
-            onClick={() => {
-              cancelEdit();
-              if (!products.length) return;
+    const prevAfter = cursorStack[cursorStack.length - 1];
 
-              // store current page "after" cursor (for Previous)
-              const currentAfter = new URLSearchParams(window.location.search).get("after") || "";
-              setCursorStack((s) => [...s, currentAfter]);
+    setCursorStack((s) => s.slice(0, -1));
 
-              const nextAfter = products[products.length - 1].cursor;
-              navigate(buildUrl({ q, after: nextAfter }));
-            }}
-          >
-            Next
-          </Button>
+    submit(
+      { q, after: prevAfter },
+      { method: "get" }
+    );
+  }}
+>
+  Previous
+</Button>
+
+<Button
+  disabled={!pageInfo?.hasNextPage || products.length === 0}
+  variant="primary"
+  onClick={() => {
+    cancelEdit();
+
+    if (!products.length) return;
+
+    const currentAfter =
+      new URLSearchParams(window.location.search).get("after") || "";
+
+    setCursorStack((s) => [...s, currentAfter]);
+
+    const nextAfter = products[products.length - 1].cursor;
+
+    submit(
+      { q, after: nextAfter },
+      { method: "get" }
+    );
+  }}
+>
+  Next
+</Button>
         </InlineStack>
       </Card>
     </Page>
