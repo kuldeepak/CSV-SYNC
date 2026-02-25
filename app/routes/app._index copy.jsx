@@ -1,245 +1,674 @@
-import { useLoaderData, Link } from "@remix-run/react";
-
+import { json } from "@remix-run/node";
+import { useLoaderData, useNavigate, useSubmit } from "@remix-run/react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { authenticate } from "../shopify.server";
 import {
   Page,
   Card,
+  Thumbnail,
   Button,
-  DataTable,
-  TextField,
-  Collapsible,
-  Badge,
   InlineStack,
-  Box,
-  Divider,
+  Badge,
+  Text,
+  TextField,
 } from "@shopify/polaris";
 
-import { useState } from "react";
+/* =======================
+   HELPERS (Search & Status)
+======================= */
+function escapeShopifyQueryValue(input) {
+  if (!input) return "";
+  return String(input)
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/"/g, '\\"');
+}
 
-import { authenticate } from "../shopify.server";
+function buildProductsQuery(raw) {
+  const q = (raw || "").trim();
+  if (!q) return null;
 
+  const looksAdvanced =
+    q.includes(":") ||
+    /\b(AND|OR|NOT)\b/i.test(q) ||
+    q.includes("(") ||
+    q.includes(")");
 
-// ================= LOADER =================
+  if (looksAdvanced) return q;
 
-export async function loader({ request }) {
+  const val = escapeShopifyQueryValue(q);
+  const quoted = q.includes(" ") ? `"${val}"` : val;
+  return `title:${quoted} OR sku:${quoted}`;
+}
 
+// Stock status
+const getStockStatus = (qty) => {
+  const count = Number(qty) || 0;
+  if (count <= 5) return { label: "Low", tone: "critical" };
+  if (count <= 20) return { label: "Medium", tone: "warning" };
+  return { label: "Healthy", tone: "success" };
+};
+
+/* =======================
+   LOADER (Stable global sort + stable pagination)
+   ✅ only forward cursor pagination (first/after)
+   ✅ sortKey INVENTORY_TOTAL (low stock top)
+======================= */
+function toPositiveInt(v, fallback = 1) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const i = Math.floor(n);
+  return i >= 1 ? i : fallback;
+}
+
+export const loader = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
+  const url = new URL(request.url);
 
-  const query = `
-  {
-    products(first: 50) {
-      edges {
-        node {
-          id
-          title
-          totalInventory
+  const qParam = url.searchParams.get("q") || "";
+  const query = buildProductsQuery(qParam);
 
-          variants(first: 20) {
-            edges {
-              node {
-                id
-                sku
-                price
-                inventoryQuantity
+  const page = toPositiveInt(url.searchParams.get("page"), 1);
+
+  const PAGE_SIZE = 10;
+
+  // Convert page → cursor offset
+  const offset = (page - 1) * PAGE_SIZE;
+
+  let after = null;
+  let skipped = 0;
+  let edges = [];
+
+  while (skipped < offset + PAGE_SIZE) {
+    const res = await admin.graphql(
+      `query Products($first: Int!, $after: String, $query: String) {
+        products(
+          first: $first
+          after: $after
+          query: $query
+          sortKey: INVENTORY_TOTAL
+          reverse: false
+        ) {
+          edges {
+            cursor
+            node {
+              id
+              title
+              status
+              totalInventory
+              variants(first: 50) {
+                edges {
+                  node {
+                    id
+                    title
+                    sku
+                    price
+                    inventoryQuantity
+                    inventoryItem { id }
+                  }
+                }
               }
+              featuredImage { url }
             }
           }
+          pageInfo {
+            hasNextPage
+          }
         }
+      }`,
+      {
+        variables: {
+          first: PAGE_SIZE,
+          after,
+          query,
+        },
       }
+    );
+
+    const data = await res.json();
+    const conn = data?.data?.products;
+
+    if (!conn?.edges?.length) break;
+
+    after = conn.edges[conn.edges.length - 1].cursor;
+
+    if (skipped >= offset) {
+      edges = conn.edges;
+      break;
     }
-  }
-  `;
 
-  const res = await admin.graphql(query);
-  const json = await res.json();
+    skipped += conn.edges.length;
 
-  return json.data.products.edges.map(e => e.node);
-}
-
-
-
-// ================= HELPERS =================
-
-function getStockStatus(qty) {
-
-  if (qty <= 10) {
-    return { tone: "critical", label: "Low Stock" };
+    if (!conn.pageInfo.hasNextPage) break;
   }
 
-  if (qty <= 30) {
-    return { tone: "warning", label: "Medium" };
+  return json({
+    products: edges,
+    page,
+    pageInfo: {
+      hasPreviousPage: page > 1,
+      hasNextPage: edges.length === PAGE_SIZE,
+    },
+    q: qParam,
+  });
+};
+
+/* =======================
+   ACTION
+======================= */
+export const action = async ({ request }) => {
+  const { admin } = await authenticate.admin(request);
+  const form = await request.formData();
+  const type = form.get("type");
+
+  if (type === "delete") {
+    await admin.graphql(
+      `mutation productDelete($id: ID!) {
+        productDelete(input: { id: $id }) { deletedProductId }
+      }`,
+      { variables: { id: form.get("productId") } }
+    );
+    return json({ success: true });
   }
 
-  return { tone: "success", label: "Healthy" };
-}
+  if (type === "variant-price") {
+    const productId = form.get("productId");
+    const variantId = form.get("variantId");
+    const price = form.get("price");
 
+    const result = await admin.graphql(
+      `mutation variantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+          productVariants { id price }
+          userErrors { field message }
+        }
+      }`,
+      { variables: { productId, variants: [{ id: variantId, price }] } }
+    );
 
+    const d = await result.json();
+    const errors = d.data?.productVariantsBulkUpdate?.userErrors;
+    if (errors?.length) return json({ success: false, errors });
+    return json({ success: true });
+  }
 
-// ================= UI =================
+  if (type === "variant-inventory") {
+    const inventoryItemId = form.get("inventoryItemId");
+    const quantity = parseInt(form.get("quantity"), 10);
 
-export default function Dashboard() {
+    const locRes = await admin.graphql(
+      `query getLocation($id: ID!) {
+        inventoryItem(id: $id) {
+          inventoryLevels(first: 1) {
+            edges { node { location { id } } }
+          }
+        }
+      }`,
+      { variables: { id: inventoryItemId } }
+    );
 
-  const products = useLoaderData();
+    const locData = await locRes.json();
+    const locationId =
+      locData.data?.inventoryItem?.inventoryLevels?.edges[0]?.node?.location?.id;
 
-  const [open, setOpen] = useState({});
-  const [search, setSearch] = useState("");
+    if (!locationId) return json({ success: false, error: "Location not found" });
 
+    const invRes = await admin.graphql(
+      `mutation inventorySet($input: InventorySetQuantitiesInput!) {
+        inventorySetQuantities(input: $input) {
+          userErrors { field message }
+        }
+      }`,
+      {
+        variables: {
+          input: {
+            name: "available",
+            reason: "correction",
+            ignoreCompareQuantity: true,
+            quantities: [{ inventoryItemId, locationId, quantity }],
+          },
+        },
+      }
+    );
 
-  /* Sort: Low stock first */
-  const sorted = [...products].sort(
-    (a, b) => a.totalInventory - b.totalInventory
-  );
+    const invData = await invRes.json();
+    const errors = invData.data?.inventorySetQuantities?.userErrors;
+    if (errors?.length) return json({ success: false, errors });
+    return json({ success: true });
+  }
 
+  return json({ success: false, error: "Unknown action type" });
+};
 
-  /* Search */
-  const filtered = sorted.filter(p =>
-    p.title.toLowerCase().includes(search.toLowerCase())
-  );
+/* =======================
+   STYLES
+======================= */
+const tableStyle = { width: "100%", borderCollapse: "collapse", fontSize: "14px" };
+const thStyle = {
+  textAlign: "left",
+  padding: "10px 12px",
+  borderBottom: "2px solid #e1e3e5",
+  color: "#6d7175",
+  fontWeight: 600,
+  background: "#f6f6f7",
+};
+const tdStyle = {
+  padding: "10px 12px",
+  borderBottom: "1px solid #e1e3e5",
+  verticalAlign: "middle",
+};
 
+/* =======================
+   INLINE EDIT CELL
+======================= */
+function InlineEditable({
+  value,
+  onSave,
+  type = "text",
+  editing,
+  onStartEdit,
+  onCancelEdit,
+}) {
+  const [val, setVal] = useState(value);
+
+  useEffect(() => setVal(value), [value, editing]);
+
+  const handleSave = () => {
+    onCancelEdit();
+    if (String(val) !== String(value)) onSave(val);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") handleSave();
+    if (e.key === "Escape") {
+      setVal(value);
+      onCancelEdit();
+    }
+  };
+
+  if (editing) {
+    return (
+      <div style={{ minWidth: 110 }}>
+        <TextField
+          value={val}
+          onChange={setVal}
+          onBlur={handleSave}
+          autoFocus
+          type={type}
+          onKeyDown={handleKeyDown}
+        />
+      </div>
+    );
+  }
 
   return (
-    <Page
-      title="Inventory Dashboard"
-      primaryAction={{
-        content: "📂 Upload CSV",
-        url: "/app/upload",
+    <div
+      onClick={onStartEdit}
+      title="Click to edit"
+      style={{
+        cursor: "pointer",
+        padding: "4px 6px",
+        borderRadius: 6,
+        border: "1px solid transparent",
+        transition: "all 0.15s",
+        display: "inline-block",
+        minWidth: 60,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.border = "1px solid #bbb";
+        e.currentTarget.style.background = "#f6f6f7";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.border = "1px solid transparent";
+        e.currentTarget.style.background = "transparent";
       }}
     >
+      {value ?? "—"}
+    </div>
+  );
+}
+
+/* =======================
+   MAIN COMPONENT (Clean + Stable)
+======================= */
+export default function Index() {
+  // const { products, pageInfo, q } = useLoaderData();
+  const { products, pageInfo, q, page } = useLoaderData();
+  const navigate = useNavigate();
+  const submit = useSubmit();
 
 
-      {/* SEARCH */}
-      <Card sectioned>
+  
+  // ✅ cursor history for Previous button (stable)
+  const [cursorStack, setCursorStack] = useState([]);
 
-        <TextField
-          label="Search Product"
-          placeholder="Search by name..."
-          value={search}
-          onChange={setSearch}
-          autoComplete="off"
-        />
+  const [openVariantProductId, setOpenVariantProductId] = useState(null);
+  const [editingCell, setEditingCell] = useState(null);
 
-      </Card>
+  // Search UI
+  const [search, setSearch] = useState(q || "");
+  useEffect(() => setSearch(q || ""), [q]);
 
+  // ✅ whenever query changes (new search / clear) reset pagination history
+  useEffect(() => {
+    setCursorStack([]);
+  }, [q]);
 
-      <br />
+  const buildUrl = ({ q, after }) => {
+    const sp = new URLSearchParams();
+    if (q) sp.set("q", q);
+    if (after) sp.set("after", after);
+    return `?${sp.toString()}`;
+  };
 
+  const isEditing = (scope, id, field) =>
+    editingCell?.scope === scope &&
+    editingCell?.id === id &&
+    editingCell?.field === field;
 
-      {/* PRODUCTS */}
-      {filtered.map(product => {
+  const startEdit = (scope, id, field) => setEditingCell({ scope, id, field });
+  const cancelEdit = () => setEditingCell(null);
 
-        const stock = product.totalInventory;
+  const saveProductPrice = (productId, variantId, rawPrice) => {
+    const price = String(rawPrice || "").replace("₹", "").trim();
+    submit({ type: "variant-price", productId, variantId, price }, { method: "post" });
+  };
 
-        const status = getStockStatus(stock);
+  const saveInventoryByInventoryItem = (inventoryItemId, quantity) => {
+    submit({ type: "variant-inventory", inventoryItemId, quantity }, { method: "post" });
+  };
 
+  const deleteProduct = (productId) =>
+    submit({ type: "delete", productId }, { method: "post" });
 
-        return (
+  // ✅ unified qty source (badge + inventory same)
+  const getRowInfo = (node) => {
+    const variants = node.variants.edges.map((e) => e.node);
+    const firstVariant = variants[0];
 
-          <Card key={product.id} sectioned>
+    const hasRealVariants =
+      variants.length > 1 || firstVariant?.title !== "Default Title";
 
-            {/* PRODUCT HEADER */}
-            <InlineStack
-              align="space-between"
-              gap="400"
-            >
+    const qty = hasRealVariants
+      ? Number(node.totalInventory ?? 0)
+      : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
 
-              <Box>
+    return { variants, firstVariant, hasRealVariants, qty };
+  };
 
-                <h3 style={{ margin: 0 }}>
-                  {product.title}
-                </h3>
-
-                <p style={{ margin: "4px 0" }}>
-                  Total Stock: <b>{stock}</b>
-                </p>
-
-              </Box>
-
-
-              {/* STATUS + ACTIONS */}
-              <InlineStack gap="300">
-
-                <Badge tone={status.tone}>
-                  {status.label}
-                </Badge>
-
-
-                <Button
-                  onClick={() =>
-                    setOpen({
-                      ...open,
-                      [product.id]: !open[product.id],
-                    })
+  return (
+    <Page title="Inventory Manager">
+      <Card>
+        {/* SEARCH */}
+        <div style={{ padding: 16, borderBottom: "1px solid #e1e3e5" }}>
+          <InlineStack gap="300" align="space-between">
+            <div style={{ flex: 1, minWidth: 280 }}>
+              <TextField
+                label="Search by Title or SKU"
+                labelHidden
+                placeholder='Search... (e.g. "Nike" or "sku:ABC123")'
+                value={search}
+                onChange={setSearch}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    navigate(buildUrl({ q: search.trim() || "" }));
                   }
-                >
-                  {open[product.id]
-                    ? "Hide Variants"
-                    : "Show Variants"}
-                </Button>
-
-
-                <Link
-                  to={`/app/product/${encodeURIComponent(product.id)}`}
-                >
-                  <Button primary>
-                    Manage
-                  </Button>
-                </Link>
-
-              </InlineStack>
-
-            </InlineStack>
-
-
-            <Divider />
-
-
-            {/* VARIANTS */}
-            <Collapsible open={open[product.id]}>
-
-              <br />
-
-              <DataTable
-                columnContentTypes={[
-                  "text",
-                  "numeric",
-                  "numeric",
-                  "text",
-                ]}
-                headings={[
-                  "SKU",
-                  "Price",
-                  "Stock",
-                  "Variant ID",
-                ]}
-                rows={product.variants.edges.map(v => {
-
-                  const vStock = v.node.inventoryQuantity;
-
-                  const vStatus =
-                    getStockStatus(vStock);
-
-                  return [
-                    v.node.sku || "N/A",
-
-                    "₹" + v.node.price,
-
-                    <InlineStack gap="200" key={v.node.id}>
-                      <span>{vStock}</span>
-                      <Badge tone={vStatus.tone}>
-                        {vStatus.label}
-                      </Badge>
-                    </InlineStack>,
-
-                    v.node.id,
-                  ];
-                })}
+                }}
+                clearButton
+                onClearButtonClick={() => navigate(`.`)}
               />
+            </div>
 
-            </Collapsible>
+            <InlineStack gap="200">
+              <Button
+                variant="primary"
+                onClick={() => navigate(buildUrl({ q: search.trim() || "" }))}
+              >
+                Search
+              </Button>
+              <Button disabled={!q} onClick={() => navigate(buildUrl({ q: "" }))}>
+                Clear
+              </Button>
+            </InlineStack>
+          </InlineStack>
 
-          </Card>
-        );
-      })}
+          <div style={{ marginTop: 8 }}>
+            <Text as="p" variant="bodySm" tone="subdued">
+              Sorted: Low → Medium → Healthy (by total inventory)
+              {q ? (
+                <>
+                  {" "}
+                  | Query: <strong>{q}</strong>
+                </>
+              ) : null}
+            </Text>
+          </div>
+        </div>
 
+        <div style={{ overflowX: "auto" }}>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Image</th>
+                <th style={thStyle}>Title</th>
+                <th style={thStyle}>Status</th>
+                <th style={thStyle}>Stock Level</th>
+                <th style={thStyle}>Price</th>
+                <th style={thStyle}>Inventory</th>
+                <th style={thStyle}>Actions</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {products.map(({ node, cursor }) => {
+                const { variants, firstVariant, hasRealVariants, qty } = getRowInfo(node);
+                const isOpen = openVariantProductId === node.id;
+                const stockStatus = getStockStatus(qty);
+
+                // ✅ Only allow “row inventory edit” for single-variant products
+                const canEditRowInventory = !hasRealVariants;
+
+                return (
+                  <Fragment key={node.id}>
+                    <tr>
+                      <td style={tdStyle}>
+                        <Thumbnail
+                          source={node.featuredImage?.url || ""}
+                          size="small"
+                          alt={node.title}
+                        />
+                      </td>
+
+                      <td style={{ ...tdStyle, minWidth: 220 }}>
+                        <Text as="p" variant="bodyMd">
+                          {node.title}
+                        </Text>
+                      </td>
+
+                      <td style={tdStyle}>
+                        <Badge tone={node.status === "ACTIVE" ? "success" : undefined}>
+                          {node.status}
+                        </Badge>
+                      </td>
+
+                      <td style={tdStyle}>
+                        <Badge tone={stockStatus.tone}>{stockStatus.label}</Badge>
+                      </td>
+
+                      <td style={{ ...tdStyle, minWidth: 120 }}>
+                        <InlineEditable
+                          value={firstVariant?.price ? `₹${firstVariant.price}` : "—"}
+                          editing={isEditing("product", node.id, "price")}
+                          onStartEdit={() => startEdit("product", node.id, "price")}
+                          onCancelEdit={cancelEdit}
+                          onSave={(v) => saveProductPrice(node.id, firstVariant?.id, v)}
+                          type="text"
+                        />
+                      </td>
+
+                      <td style={{ ...tdStyle, minWidth: 110 }}>
+                        {canEditRowInventory ? (
+                          <InlineEditable
+                            value={String(qty)}
+                            editing={isEditing("product", node.id, "inventory")}
+                            onStartEdit={() => startEdit("product", node.id, "inventory")}
+                            onCancelEdit={cancelEdit}
+                            onSave={(v) =>
+                              saveInventoryByInventoryItem(firstVariant?.inventoryItem?.id, v)
+                            }
+                            type="number"
+                          />
+                        ) : (
+                          <Text as="p">{String(qty)}</Text>
+                        )}
+                      </td>
+
+                      <td style={{ ...tdStyle, minWidth: 260 }}>
+                        <InlineStack gap="200">
+                          {hasRealVariants && (
+                            <Button
+                              size="slim"
+                              onClick={() => {
+                                cancelEdit();
+                                setOpenVariantProductId(isOpen ? null : node.id);
+                              }}
+                            >
+                              {isOpen ? "Hide Variants" : "Variants"}
+                            </Button>
+                          )}
+
+                          <Button
+                            tone="critical"
+                            size="slim"
+                            onClick={() => deleteProduct(node.id)}
+                          >
+                            Delete
+                          </Button>
+                        </InlineStack>
+                      </td>
+                    </tr>
+
+                    {hasRealVariants && isOpen && (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}
+                        >
+                          <Text variant="headingSm" as="p">
+                            Variants
+                          </Text>
+
+                          <div
+                            style={{
+                              marginTop: 8,
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 8,
+                            }}
+                          >
+                            {variants.map((vr) => {
+                              const vrStock = getStockStatus(vr.inventoryQuantity);
+                              return (
+                                <div
+                                  key={vr.id}
+                                  style={{
+                                    background: "#fff",
+                                    border: "1px solid #e1e3e5",
+                                    borderRadius: 8,
+                                    padding: "10px 14px",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 12,
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <span style={{ flex: 1, minWidth: 200 }}>
+                                    <strong>{vr.title}</strong>
+                                    {vr.sku ? (
+                                      <span style={{ marginLeft: 8, opacity: 0.75 }}>
+                                        SKU: {vr.sku}
+                                      </span>
+                                    ) : null}
+                                  </span>
+
+                                  <div style={{ minWidth: 100 }}>
+                                    <Badge tone={vrStock.tone}>{vrStock.label}</Badge>
+                                  </div>
+
+                                  <div style={{ minWidth: 140 }}>
+                                    <InlineEditable
+                                      value={vr.price ? `₹${vr.price}` : "—"}
+                                      editing={isEditing("variant", vr.id, "price")}
+                                      onStartEdit={() => startEdit("variant", vr.id, "price")}
+                                      onCancelEdit={cancelEdit}
+                                      onSave={(v) => saveProductPrice(node.id, vr.id, v)}
+                                      type="text"
+                                    />
+                                  </div>
+
+                                  <div style={{ minWidth: 120 }}>
+                                    <InlineEditable
+                                      value={String(vr.inventoryQuantity ?? "")}
+                                      editing={isEditing("variant", vr.id, "inventory")}
+                                      onStartEdit={() =>
+                                        startEdit("variant", vr.id, "inventory")
+                                      }
+                                      onCancelEdit={cancelEdit}
+                                      onSave={(v) =>
+                                        saveInventoryByInventoryItem(vr.inventoryItem?.id, v)
+                                      }
+                                      type="number"
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <br />
+
+        {/* PAGINATION (Stable) */}
+        {/* PAGINATION (Page Based) */}
+<InlineStack align="space-between" gap="300">
+
+  <Button
+    disabled={!pageInfo?.hasPreviousPage || page <= 1}
+    onClick={() => {
+      cancelEdit();
+      navigate(`?q=${q || ""}&page=${page - 1}`);
+    }}
+  >
+    Previous
+  </Button>
+
+  <Text as="p" variant="bodySm" tone="subdued">
+    Page {page}
+  </Text>
+
+  <Button
+    disabled={!pageInfo?.hasNextPage}
+    variant="primary"
+    onClick={() => {
+      cancelEdit();
+      navigate(`?q=${q || ""}&page=${page + 1}`);
+    }}
+  >
+    Next
+  </Button>
+
+</InlineStack>
+      </Card>
     </Page>
   );
 }
