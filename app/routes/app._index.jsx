@@ -82,11 +82,13 @@ export const loader = async ({ request }) => {
       $query: String
     ) {
       products(
-        first: $first
-        last: $last
-        after: $after
-        before: $before
-        query: $query
+       first: $first
+  last: $last
+  after: $after
+  before: $before
+  query: $query
+  sortKey: INVENTORY_TOTAL
+  reverse: false
       ) {
         edges {
           cursor
@@ -120,15 +122,15 @@ export const loader = async ({ request }) => {
     {
       variables: before
         ? {
-            last: PAGE_SIZE,
-            before,
-            query,
-          }
+          last: PAGE_SIZE,
+          before,
+          query,
+        }
         : {
-            first: PAGE_SIZE,
-            after,
-            query,
-          },
+          first: PAGE_SIZE,
+          after,
+          query,
+        },
     }
   );
 
@@ -323,6 +325,20 @@ function InlineEditable({
    MAIN COMPONENT
 ======================= */
 export default function Index() {
+
+  const getRowQty = (node) => {
+  const variants = node.variants.edges.map((e) => e.node);
+  const firstVariant = variants[0];
+
+  const hasRealVariants =
+    variants.length > 1 || firstVariant?.title !== "Default Title";
+
+  // Multiple variants → use total inventory
+  if (hasRealVariants) return Number(node.totalInventory ?? 0);
+
+  // Single variant → use variant inventory
+  return Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
+};
   const { products, pageInfo, q, page, totalFetched, capped } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
@@ -335,15 +351,15 @@ export default function Index() {
   const [search, setSearch] = useState(q || "");
   useEffect(() => setSearch(q || ""), [q]);
 
- const buildUrl = ({ q, after, before }) => {
-  const sp = new URLSearchParams();
+  const buildUrl = ({ q, after, before }) => {
+    const sp = new URLSearchParams();
 
-  if (q) sp.set("q", q);
-  if (after) sp.set("after", after);
-  if (before) sp.set("before", before);
+    if (q) sp.set("q", q);
+    if (after) sp.set("after", after);
+    if (before) sp.set("before", before);
 
-  return `?${sp.toString()}`;
-};
+    return `?${sp.toString()}`;
+  };
 
   const isEditing = (scope, id, field) =>
     editingCell?.scope === scope && editingCell?.id === id && editingCell?.field === field;
@@ -381,7 +397,7 @@ export default function Index() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter")
                     // navigate(buildUrl({ q: search.trim() || "", page: 1 }));
-                  navigate(`?q=${encodeURIComponent(search.trim() || "")}`);
+                    navigate(`?q=${encodeURIComponent(search.trim() || "")}`);
                 }}
                 clearButton
                 // onClearButtonClick={() => navigate(buildUrl({ q: "", page: 1 }))}
@@ -436,10 +452,13 @@ export default function Index() {
                 const hasRealVariants =
                   variants.length > 1 || firstVariant?.title !== "Default Title";
                 const isOpen = openVariantProductId === node.id;
-                
+
                 // Stock Alert Logic
-                const totalQty = node.totalInventory ?? 0;
-                const stockStatus = getStockStatus(totalQty);
+                // const totalQty = node.totalInventory ?? 0;
+                // const stockStatus = getStockStatus(totalQty);
+
+                const rowQty = getRowQty(node);
+                const stockStatus = getStockStatus(rowQty);
 
                 return (
                   <Fragment key={node.id}>
@@ -484,7 +503,8 @@ export default function Index() {
 
                       <td style={{ ...tdStyle, minWidth: 110 }}>
                         <InlineEditable
-                          value={String(firstVariant?.inventoryQuantity ?? node.totalInventory ?? "")}
+                          // value={String(firstVariant?.inventoryQuantity ?? node.totalInventory ?? "")}
+                          value={String(rowQty)}
                           editing={isEditing("product", node.id, "inventory")}
                           onStartEdit={() => startEdit("product", node.id, "inventory")}
                           onCancelEdit={cancelEdit}
@@ -525,56 +545,57 @@ export default function Index() {
 
                           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
                             {variants.map((vr) => {
-                               const vrStock = getStockStatus(vr.inventoryQuantity);
-                               return (
-                              <div
-                                key={vr.id}
-                                style={{
-                                  background: "#fff",
-                                  border: "1px solid #e1e3e5",
-                                  borderRadius: 8,
-                                  padding: "10px 14px",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 12,
-                                  flexWrap: "wrap",
-                                }}
-                              >
-                                <span style={{ flex: 1, minWidth: 200 }}>
-                                  <strong>{vr.title}</strong>
-                                  {vr.sku ? (
-                                    <span style={{ marginLeft: 8, opacity: 0.75 }}>SKU: {vr.sku}</span>
-                                  ) : null}
-                                </span>
+                              const vrStock = getStockStatus(vr.inventoryQuantity);
+                              return (
+                                <div
+                                  key={vr.id}
+                                  style={{
+                                    background: "#fff",
+                                    border: "1px solid #e1e3e5",
+                                    borderRadius: 8,
+                                    padding: "10px 14px",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 12,
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <span style={{ flex: 1, minWidth: 200 }}>
+                                    <strong>{vr.title}</strong>
+                                    {vr.sku ? (
+                                      <span style={{ marginLeft: 8, opacity: 0.75 }}>SKU: {vr.sku}</span>
+                                    ) : null}
+                                  </span>
 
-                                {/* Variant Stock Indicator */}
-                                <div style={{ minWidth: 100 }}>
+                                  {/* Variant Stock Indicator */}
+                                  <div style={{ minWidth: 100 }}>
                                     <Badge tone={vrStock.tone}>{vrStock.label}</Badge>
-                                </div>
+                                  </div>
 
-                                <div style={{ minWidth: 140 }}>
-                                  <InlineEditable
-                                    value={vr.price ? `₹${vr.price}` : "—"}
-                                    editing={isEditing("variant", vr.id, "price")}
-                                    onStartEdit={() => startEdit("variant", vr.id, "price")}
-                                    onCancelEdit={cancelEdit}
-                                    onSave={(v) => saveProductPrice(node.id, vr.id, v)}
-                                    type="text"
-                                  />
-                                </div>
+                                  <div style={{ minWidth: 140 }}>
+                                    <InlineEditable
+                                      value={vr.price ? `₹${vr.price}` : "—"}
+                                      editing={isEditing("variant", vr.id, "price")}
+                                      onStartEdit={() => startEdit("variant", vr.id, "price")}
+                                      onCancelEdit={cancelEdit}
+                                      onSave={(v) => saveProductPrice(node.id, vr.id, v)}
+                                      type="text"
+                                    />
+                                  </div>
 
-                                <div style={{ minWidth: 120 }}>
-                                  <InlineEditable
-                                    value={String(vr.inventoryQuantity ?? "")}
-                                    editing={isEditing("variant", vr.id, "inventory")}
-                                    onStartEdit={() => startEdit("variant", vr.id, "inventory")}
-                                    onCancelEdit={cancelEdit}
-                                    onSave={(v) => saveInventoryByInventoryItem(vr.inventoryItem?.id, v)}
-                                    type="number"
-                                  />
+                                  <div style={{ minWidth: 120 }}>
+                                    <InlineEditable
+                                      value={String(vr.inventoryQuantity ?? "")}
+                                      editing={isEditing("variant", vr.id, "inventory")}
+                                      onStartEdit={() => startEdit("variant", vr.id, "inventory")}
+                                      onCancelEdit={cancelEdit}
+                                      onSave={(v) => saveInventoryByInventoryItem(vr.inventoryItem?.id, v)}
+                                      type="number"
+                                    />
+                                  </div>
                                 </div>
-                              </div>
-                            )})}
+                              )
+                            })}
                           </div>
                         </td>
                       </tr>
@@ -588,40 +609,40 @@ export default function Index() {
 
         <br />
 
-       <InlineStack align="space-between" gap="300">
-  <Button
-    disabled={!pageInfo?.hasPreviousPage}
-    onClick={() => {
-      cancelEdit();
+        <InlineStack align="space-between" gap="300">
+          <Button
+            disabled={!pageInfo?.hasPreviousPage}
+            onClick={() => {
+              cancelEdit();
 
-      if (!products.length) return;
+              if (!products.length) return;
 
-      window.location.href = buildUrl({
-        q,
-        before: products[0].cursor,
-      });
-    }}
-  >
-    Previous
-  </Button>
+              window.location.href = buildUrl({
+                q,
+                before: products[0].cursor,
+              });
+            }}
+          >
+            Previous
+          </Button>
 
-  <Button
-    disabled={!pageInfo?.hasNextPage}
-    variant="primary"
-    onClick={() => {
-      cancelEdit();
+          <Button
+            disabled={!pageInfo?.hasNextPage}
+            variant="primary"
+            onClick={() => {
+              cancelEdit();
 
-      if (!products.length) return;
+              if (!products.length) return;
 
-      window.location.href = buildUrl({
-        q,
-        after: products[products.length - 1].cursor,
-      });
-    }}
-  >
-    Next
-  </Button>
-</InlineStack>
+              window.location.href = buildUrl({
+                q,
+                after: products[products.length - 1].cursor,
+              });
+            }}
+          >
+            Next
+          </Button>
+        </InlineStack>
       </Card>
     </Page>
   );

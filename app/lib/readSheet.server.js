@@ -10,7 +10,7 @@ export async function readSheetCSV() {
     const response = await axios.get(SHEET_URL, {
       responseType: "text",
       responseEncoding: "utf8",
-      timeout: 20000,
+      timeout: 60000,
     });
 
     const rows = [];
