@@ -34,6 +34,7 @@
     "@shopify/shopify-api": "^12.3.0",
     "@shopify/shopify-app-remix": "^4.1.0",
     "@shopify/shopify-app-session-storage-prisma": "^8.0.0",
+    "axios": "^1.13.5",
     "csv-parser": "^3.2.0",
     "dotenv": "^17.3.1",
     "isbot": "^5.1.0",
