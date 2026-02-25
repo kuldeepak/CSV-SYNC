@@ -68,92 +68,66 @@ export const loader = async ({ request }) => {
   const url = new URL(request.url);
 
   const qParam = url.searchParams.get("q") || "";
+  const after = url.searchParams.get("after") || null;
+
   const query = buildProductsQuery(qParam);
 
-  const page = toPositiveInt(url.searchParams.get("page"), 1);
-
   const PAGE_SIZE = 10;
-  const MAX_FETCH = 500;
-  const FETCH_BATCH = 100;
 
-  let allEdges = [];
-  let after = null;
-
-  // Fetch multiple batches
-  while (allEdges.length < MAX_FETCH) {
-    const first = Math.min(FETCH_BATCH, MAX_FETCH - allEdges.length);
-
-    const res = await admin.graphql(
-      `query Products($first: Int!, $after: String, $query: String) {
-        products(
-          first: $first
-          after: $after
-          query: $query
-          sortKey: INVENTORY_TOTAL
-          reverse: false
-        ) {
-          edges {
-            cursor
-            node {
-              id
-              title
-              status
-              totalInventory
-              variants(first: 50) {
-                edges {
-                  node {
-                    id
-                    title
-                    sku
-                    price
-                    inventoryQuantity
-                    inventoryItem { id }
-                  }
+  const res = await admin.graphql(
+    `query Products($first: Int!, $after: String, $query: String) {
+      products(
+        first: $first
+        after: $after
+        query: $query
+        sortKey: INVENTORY_TOTAL
+        reverse: false
+      ) {
+        edges {
+          cursor
+          node {
+            id
+            title
+            status
+            totalInventory
+            variants(first: 50) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  price
+                  inventoryQuantity
+                  inventoryItem { id }
                 }
               }
-              featuredImage { url }
             }
+            featuredImage { url }
           }
-          pageInfo { hasNextPage }
         }
-      }`,
-      { variables: { first, after, query } }
-    );
-
-    const data = await res.json();
-    const conn = data?.data?.products;
-
-    const edges = conn?.edges || [];
-    allEdges = allEdges.concat(edges);
-
-    after = edges.length ? edges[edges.length - 1].cursor : null;
-
-    if (!conn?.pageInfo?.hasNextPage || !after) break;
-  }
-
-  // Global low stock sort
-  allEdges.sort(
-    (a, b) => (a.node.totalInventory ?? 0) - (b.node.totalInventory ?? 0)
+        pageInfo {
+          hasNextPage
+        }
+      }
+    }`,
+    {
+      variables: {
+        first: PAGE_SIZE,
+        after,
+        query,
+      },
+    }
   );
 
-  const total = allEdges.length;
-
-  const start = (page - 1) * PAGE_SIZE;
-  const end = start + PAGE_SIZE;
-
-  const pageEdges = allEdges.slice(start, end);
+  const data = await res.json();
 
   return json({
-    products: pageEdges,
-    page,
-    pageInfo: {
-      hasPreviousPage: page > 1,
-      hasNextPage: end < total,
-    },
+    products: data.data.products.edges,
+    pageInfo: data.data.products.pageInfo,
     q: qParam,
+    after,
   });
 };
-
 /* =======================
    ACTION
 ======================= */
@@ -334,7 +308,15 @@ function InlineEditable({
 ======================= */
 export default function Index() {
   // const { products, pageInfo, q } = useLoaderData();
-  const { products, pageInfo, q, page } = useLoaderData();
+
+
+
+  const lastCursor = useMemo(() => {
+  return products?.length
+    ? products[products.length - 1].cursor
+    : null;
+}, [products]);
+  const { products, pageInfo, q, after } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
 
@@ -356,11 +338,13 @@ export default function Index() {
   }, [q]);
 
   const buildUrl = ({ q, after }) => {
-    const sp = new URLSearchParams();
-    if (q) sp.set("q", q);
-    if (after) sp.set("after", after);
-    return `?${sp.toString()}`;
-  };
+  const sp = new URLSearchParams();
+
+  if (q) sp.set("q", q);
+  if (after) sp.set("after", after);
+
+  return `?${sp.toString()}`;
+};
 
   const isEditing = (scope, id, field) =>
     editingCell?.scope === scope &&
@@ -641,26 +625,36 @@ export default function Index() {
         {/* PAGINATION (Page Based) */}
 <InlineStack align="space-between" gap="300">
 
+  {/* Previous */}
   <Button
-    disabled={!pageInfo?.hasPreviousPage || page <= 1}
+    disabled={cursorStack.length === 0}
     onClick={() => {
       cancelEdit();
-      navigate(`?q=${q || ""}&page=${page - 1}`);
+
+      const prev = cursorStack[cursorStack.length - 1];
+
+      setCursorStack((s) => s.slice(0, -1));
+
+      navigate(buildUrl({ q: q || "", after: prev || "" }));
     }}
   >
     Previous
   </Button>
 
   <Text as="p" variant="bodySm" tone="subdued">
-    Page {page}
+    {cursorStack.length + 1}
   </Text>
 
+  {/* Next */}
   <Button
     disabled={!pageInfo?.hasNextPage}
     variant="primary"
     onClick={() => {
       cancelEdit();
-      navigate(`?q=${q || ""}&page=${page + 1}`);
+
+      setCursorStack((s) => [...s, after]);
+
+      navigate(buildUrl({ q: q || "", after: lastCursor }));
     }}
   >
     Next
