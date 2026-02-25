@@ -1,6 +1,6 @@
 import { json } from "@remix-run/node";
 import { useLoaderData, useNavigate, useSubmit } from "@remix-run/react";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { authenticate } from "../shopify.server";
 import {
   Page,
@@ -43,23 +43,18 @@ function buildProductsQuery(raw) {
   return `title:${quoted} OR sku:${quoted}`;
 }
 
-function toPositiveInt(v, fallback = 1) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  const i = Math.floor(n);
-  return i >= 1 ? i : fallback;
-}
-
-// --- Naya Logic: Stock Status Indicator ---
+// Stock status
 const getStockStatus = (qty) => {
   const count = Number(qty) || 0;
-  if (count <= 5) return { label: "Low", tone: "critical" };     // Red
-  if (count <= 20) return { label: "Medium", tone: "warning" }; // Yellow
-  return { label: "Healthy", tone: "success" };               // Green
+  if (count <= 5) return { label: "Low", tone: "critical" };
+  if (count <= 20) return { label: "Medium", tone: "warning" };
+  return { label: "Healthy", tone: "success" };
 };
 
 /* =======================
-   LOADER (GLOBAL LOW STOCK SORT + APP PAGINATION)
+   LOADER (Stable global sort + stable pagination)
+   ✅ only forward cursor pagination (first/after)
+   ✅ sortKey INVENTORY_TOTAL (low stock top)
 ======================= */
 export const loader = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
@@ -68,27 +63,17 @@ export const loader = async ({ request }) => {
   const qParam = url.searchParams.get("q") || "";
   const query = buildProductsQuery(qParam);
 
-  const after = url.searchParams.get("after");
-  const before = url.searchParams.get("before");
-
+  const after = url.searchParams.get("after"); // only forward pagination
   const PAGE_SIZE = 10;
 
   const res = await admin.graphql(
-    `query Products(
-      $first: Int
-      $last: Int
-      $after: String
-      $before: String
-      $query: String
-    ) {
+    `query Products($first: Int!, $after: String, $query: String) {
       products(
-       first: $first
-  last: $last
-  after: $after
-  before: $before
-  query: $query
-  sortKey: INVENTORY_TOTAL
-  reverse: false
+        first: $first
+        after: $after
+        query: $query
+        sortKey: INVENTORY_TOTAL
+        reverse: false
       ) {
         edges {
           cursor
@@ -112,30 +97,21 @@ export const loader = async ({ request }) => {
             featuredImage { url }
           }
         }
-
         pageInfo {
           hasNextPage
-          hasPreviousPage
         }
       }
     }`,
     {
-      variables: before
-        ? {
-          last: PAGE_SIZE,
-          before,
-          query,
-        }
-        : {
-          first: PAGE_SIZE,
-          after,
-          query,
-        },
+      variables: {
+        first: PAGE_SIZE,
+        after: after || null,
+        query,
+      },
     }
   );
 
   const data = await res.json();
-
   const edges = data?.data?.products?.edges || [];
   const pageInfo = data?.data?.products?.pageInfo || {};
 
@@ -322,47 +298,40 @@ function InlineEditable({
 }
 
 /* =======================
-   MAIN COMPONENT
+   MAIN COMPONENT (Clean + Stable)
 ======================= */
 export default function Index() {
-
-  const getRowQty = (node) => {
-  const variants = node.variants.edges.map((e) => e.node);
-  const firstVariant = variants[0];
-
-  const hasRealVariants =
-    variants.length > 1 || firstVariant?.title !== "Default Title";
-
-  // Multiple variants → use total inventory
-  if (hasRealVariants) return Number(node.totalInventory ?? 0);
-
-  // Single variant → use variant inventory
-  return Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
-};
-  const { products, pageInfo, q, page, totalFetched, capped } = useLoaderData();
+  const { products, pageInfo, q } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
 
-  const [openVariantProductId, setOpenVariantProductId] = useState(null);
+  // ✅ cursor history for Previous button (stable)
+  const [cursorStack, setCursorStack] = useState([]);
 
+  const [openVariantProductId, setOpenVariantProductId] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
 
   // Search UI
   const [search, setSearch] = useState(q || "");
   useEffect(() => setSearch(q || ""), [q]);
 
-  const buildUrl = ({ q, after, before }) => {
-    const sp = new URLSearchParams();
+  // ✅ whenever query changes (new search / clear) reset pagination history
+  useEffect(() => {
+    setCursorStack([]);
+  }, [q]);
 
+  const buildUrl = ({ q, after }) => {
+    const sp = new URLSearchParams();
     if (q) sp.set("q", q);
     if (after) sp.set("after", after);
-    if (before) sp.set("before", before);
-
     return `?${sp.toString()}`;
   };
 
   const isEditing = (scope, id, field) =>
-    editingCell?.scope === scope && editingCell?.id === id && editingCell?.field === field;
+    editingCell?.scope === scope &&
+    editingCell?.id === id &&
+    editingCell?.field === field;
+
   const startEdit = (scope, id, field) => setEditingCell({ scope, id, field });
   const cancelEdit = () => setEditingCell(null);
 
@@ -372,14 +341,26 @@ export default function Index() {
   };
 
   const saveInventoryByInventoryItem = (inventoryItemId, quantity) => {
-    submit(
-      { type: "variant-inventory", inventoryItemId, quantity },
-      { method: "post" }
-    );
+    submit({ type: "variant-inventory", inventoryItemId, quantity }, { method: "post" });
   };
 
   const deleteProduct = (productId) =>
     submit({ type: "delete", productId }, { method: "post" });
+
+  // ✅ unified qty source (badge + inventory same)
+  const getRowInfo = (node) => {
+    const variants = node.variants.edges.map((e) => e.node);
+    const firstVariant = variants[0];
+
+    const hasRealVariants =
+      variants.length > 1 || firstVariant?.title !== "Default Title";
+
+    const qty = hasRealVariants
+      ? Number(node.totalInventory ?? 0)
+      : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
+
+    return { variants, firstVariant, hasRealVariants, qty };
+  };
 
   return (
     <Page title="Inventory Manager">
@@ -395,12 +376,11 @@ export default function Index() {
                 value={search}
                 onChange={setSearch}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter")
-                    // navigate(buildUrl({ q: search.trim() || "", page: 1 }));
-                    navigate(`?q=${encodeURIComponent(search.trim() || "")}`);
+                  if (e.key === "Enter") {
+                    navigate(buildUrl({ q: search.trim() || "" }));
+                  }
                 }}
                 clearButton
-                // onClearButtonClick={() => navigate(buildUrl({ q: "", page: 1 }))}
                 onClearButtonClick={() => navigate(`.`)}
               />
             </div>
@@ -408,11 +388,11 @@ export default function Index() {
             <InlineStack gap="200">
               <Button
                 variant="primary"
-                onClick={() => navigate(buildUrl({ q: search.trim() || "", page: 1 }))}
+                onClick={() => navigate(buildUrl({ q: search.trim() || "" }))}
               >
                 Search
               </Button>
-              <Button disabled={!q} onClick={() => navigate(buildUrl({ q: "", page: 1 }))}>
+              <Button disabled={!q} onClick={() => navigate(buildUrl({ q: "" }))}>
                 Clear
               </Button>
             </InlineStack>
@@ -420,10 +400,10 @@ export default function Index() {
 
           <div style={{ marginTop: 8 }}>
             <Text as="p" variant="bodySm" tone="subdued">
-              Fetched: <strong>{totalFetched}</strong>
-              {capped ? " (capped)" : ""}{" "}
+              Sorted: Low → Medium → Healthy (by total inventory)
               {q ? (
                 <>
+                  {" "}
                   | Query: <strong>{q}</strong>
                 </>
               ) : null}
@@ -438,7 +418,7 @@ export default function Index() {
                 <th style={thStyle}>Image</th>
                 <th style={thStyle}>Title</th>
                 <th style={thStyle}>Status</th>
-                <th style={thStyle}>Stock Level</th> {/* Naya Column */}
+                <th style={thStyle}>Stock Level</th>
                 <th style={thStyle}>Price</th>
                 <th style={thStyle}>Inventory</th>
                 <th style={thStyle}>Actions</th>
@@ -446,19 +426,13 @@ export default function Index() {
             </thead>
 
             <tbody>
-              {products.map(({ node }) => {
-                const variants = node.variants.edges.map((e) => e.node);
-                const firstVariant = variants[0];
-                const hasRealVariants =
-                  variants.length > 1 || firstVariant?.title !== "Default Title";
+              {products.map(({ node, cursor }) => {
+                const { variants, firstVariant, hasRealVariants, qty } = getRowInfo(node);
                 const isOpen = openVariantProductId === node.id;
+                const stockStatus = getStockStatus(qty);
 
-                // Stock Alert Logic
-                // const totalQty = node.totalInventory ?? 0;
-                // const stockStatus = getStockStatus(totalQty);
-
-                const rowQty = getRowQty(node);
-                const stockStatus = getStockStatus(rowQty);
+                // ✅ Only allow “row inventory edit” for single-variant products
+                const canEditRowInventory = !hasRealVariants;
 
                 return (
                   <Fragment key={node.id}>
@@ -483,11 +457,8 @@ export default function Index() {
                         </Badge>
                       </td>
 
-                      {/* NEW: Stock Level Column */}
                       <td style={tdStyle}>
-                        <Badge tone={stockStatus.tone}>
-                          {stockStatus.label}
-                        </Badge>
+                        <Badge tone={stockStatus.tone}>{stockStatus.label}</Badge>
                       </td>
 
                       <td style={{ ...tdStyle, minWidth: 120 }}>
@@ -502,17 +473,20 @@ export default function Index() {
                       </td>
 
                       <td style={{ ...tdStyle, minWidth: 110 }}>
-                        <InlineEditable
-                          // value={String(firstVariant?.inventoryQuantity ?? node.totalInventory ?? "")}
-                          value={String(rowQty)}
-                          editing={isEditing("product", node.id, "inventory")}
-                          onStartEdit={() => startEdit("product", node.id, "inventory")}
-                          onCancelEdit={cancelEdit}
-                          onSave={(v) =>
-                            saveInventoryByInventoryItem(firstVariant?.inventoryItem?.id, v)
-                          }
-                          type="number"
-                        />
+                        {canEditRowInventory ? (
+                          <InlineEditable
+                            value={String(qty)}
+                            editing={isEditing("product", node.id, "inventory")}
+                            onStartEdit={() => startEdit("product", node.id, "inventory")}
+                            onCancelEdit={cancelEdit}
+                            onSave={(v) =>
+                              saveInventoryByInventoryItem(firstVariant?.inventoryItem?.id, v)
+                            }
+                            type="number"
+                          />
+                        ) : (
+                          <Text as="p">{String(qty)}</Text>
+                        )}
                       </td>
 
                       <td style={{ ...tdStyle, minWidth: 260 }}>
@@ -529,7 +503,11 @@ export default function Index() {
                             </Button>
                           )}
 
-                          <Button tone="critical" size="slim" onClick={() => deleteProduct(node.id)}>
+                          <Button
+                            tone="critical"
+                            size="slim"
+                            onClick={() => deleteProduct(node.id)}
+                          >
                             Delete
                           </Button>
                         </InlineStack>
@@ -538,12 +516,22 @@ export default function Index() {
 
                     {hasRealVariants && isOpen && (
                       <tr>
-                        <td colSpan={7} style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}>
+                        <td
+                          colSpan={7}
+                          style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}
+                        >
                           <Text variant="headingSm" as="p">
                             Variants
                           </Text>
 
-                          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                          <div
+                            style={{
+                              marginTop: 8,
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 8,
+                            }}
+                          >
                             {variants.map((vr) => {
                               const vrStock = getStockStatus(vr.inventoryQuantity);
                               return (
@@ -563,11 +551,12 @@ export default function Index() {
                                   <span style={{ flex: 1, minWidth: 200 }}>
                                     <strong>{vr.title}</strong>
                                     {vr.sku ? (
-                                      <span style={{ marginLeft: 8, opacity: 0.75 }}>SKU: {vr.sku}</span>
+                                      <span style={{ marginLeft: 8, opacity: 0.75 }}>
+                                        SKU: {vr.sku}
+                                      </span>
                                     ) : null}
                                   </span>
 
-                                  {/* Variant Stock Indicator */}
                                   <div style={{ minWidth: 100 }}>
                                     <Badge tone={vrStock.tone}>{vrStock.label}</Badge>
                                   </div>
@@ -587,14 +576,18 @@ export default function Index() {
                                     <InlineEditable
                                       value={String(vr.inventoryQuantity ?? "")}
                                       editing={isEditing("variant", vr.id, "inventory")}
-                                      onStartEdit={() => startEdit("variant", vr.id, "inventory")}
+                                      onStartEdit={() =>
+                                        startEdit("variant", vr.id, "inventory")
+                                      }
                                       onCancelEdit={cancelEdit}
-                                      onSave={(v) => saveInventoryByInventoryItem(vr.inventoryItem?.id, v)}
+                                      onSave={(v) =>
+                                        saveInventoryByInventoryItem(vr.inventoryItem?.id, v)
+                                      }
                                       type="number"
                                     />
                                   </div>
                                 </div>
-                              )
+                              );
                             })}
                           </div>
                         </td>
@@ -609,35 +602,35 @@ export default function Index() {
 
         <br />
 
+        {/* PAGINATION (Stable) */}
         <InlineStack align="space-between" gap="300">
           <Button
-            disabled={!pageInfo?.hasPreviousPage}
+            disabled={cursorStack.length === 0}
             onClick={() => {
               cancelEdit();
+              if (cursorStack.length === 0) return;
 
-              if (!products.length) return;
-
-              window.location.href = buildUrl({
-                q,
-                before: products[0].cursor,
-              });
+              const prevAfter = cursorStack[cursorStack.length - 1];
+              setCursorStack((s) => s.slice(0, -1));
+              navigate(buildUrl({ q, after: prevAfter }));
             }}
           >
             Previous
           </Button>
 
           <Button
-            disabled={!pageInfo?.hasNextPage}
+            disabled={!pageInfo?.hasNextPage || products.length === 0}
             variant="primary"
             onClick={() => {
               cancelEdit();
-
               if (!products.length) return;
 
-              window.location.href = buildUrl({
-                q,
-                after: products[products.length - 1].cursor,
-              });
+              // store current page "after" cursor (for Previous)
+              const currentAfter = new URLSearchParams(window.location.search).get("after") || "";
+              setCursorStack((s) => [...s, currentAfter]);
+
+              const nextAfter = products[products.length - 1].cursor;
+              navigate(buildUrl({ q, after: nextAfter }));
             }}
           >
             Next
