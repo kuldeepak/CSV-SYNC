@@ -56,6 +56,13 @@ const getStockStatus = (qty) => {
    ✅ only forward cursor pagination (first/after)
    ✅ sortKey INVENTORY_TOTAL (low stock top)
 ======================= */
+function toPositiveInt(v, fallback = 1) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const i = Math.floor(n);
+  return i >= 1 ? i : fallback;
+}
+
 export const loader = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
   const url = new URL(request.url);
@@ -63,61 +70,86 @@ export const loader = async ({ request }) => {
   const qParam = url.searchParams.get("q") || "";
   const query = buildProductsQuery(qParam);
 
-  const after = url.searchParams.get("after"); // only forward pagination
-  const PAGE_SIZE = 10;
+  const page = toPositiveInt(url.searchParams.get("page"), 1);
 
-  const res = await admin.graphql(
-    `query Products($first: Int!, $after: String, $query: String) {
-      products(
-        first: $first
-        after: $after
-        query: $query
-        sortKey: INVENTORY_TOTAL
-        reverse: false
-      ) {
-        edges {
-          cursor
-          node {
-            id
-            title
-            status
-            totalInventory
-            variants(first: 50) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  price
-                  inventoryQuantity
-                  inventoryItem { id }
+  const PAGE_SIZE = 10;
+  const MAX_FETCH = 500;
+  const FETCH_BATCH = 100;
+
+  let allEdges = [];
+  let after = null;
+
+  // Fetch multiple batches
+  while (allEdges.length < MAX_FETCH) {
+    const first = Math.min(FETCH_BATCH, MAX_FETCH - allEdges.length);
+
+    const res = await admin.graphql(
+      `query Products($first: Int!, $after: String, $query: String) {
+        products(
+          first: $first
+          after: $after
+          query: $query
+          sortKey: INVENTORY_TOTAL
+          reverse: false
+        ) {
+          edges {
+            cursor
+            node {
+              id
+              title
+              status
+              totalInventory
+              variants(first: 50) {
+                edges {
+                  node {
+                    id
+                    title
+                    sku
+                    price
+                    inventoryQuantity
+                    inventoryItem { id }
+                  }
                 }
               }
+              featuredImage { url }
             }
-            featuredImage { url }
           }
+          pageInfo { hasNextPage }
         }
-        pageInfo {
-          hasNextPage
-        }
-      }
-    }`,
-    {
-      variables: {
-        first: PAGE_SIZE,
-        after: after || null,
-        query,
-      },
-    }
+      }`,
+      { variables: { first, after, query } }
+    );
+
+    const data = await res.json();
+    const conn = data?.data?.products;
+
+    const edges = conn?.edges || [];
+    allEdges = allEdges.concat(edges);
+
+    after = edges.length ? edges[edges.length - 1].cursor : null;
+
+    if (!conn?.pageInfo?.hasNextPage || !after) break;
+  }
+
+  // Global low stock sort
+  allEdges.sort(
+    (a, b) => (a.node.totalInventory ?? 0) - (b.node.totalInventory ?? 0)
   );
 
-  const data = await res.json();
-  const edges = data?.data?.products?.edges || [];
-  const pageInfo = data?.data?.products?.pageInfo || {};
+  const total = allEdges.length;
+
+  const start = (page - 1) * PAGE_SIZE;
+  const end = start + PAGE_SIZE;
+
+  const pageEdges = allEdges.slice(start, end);
 
   return json({
-    products: edges,
-    pageInfo,
+    products: pageEdges,
+    page,
+    pageInfo: {
+      hasPreviousPage: page > 1,
+      hasNextPage: end < total,
+    },
     q: qParam,
   });
 };
@@ -301,7 +333,8 @@ function InlineEditable({
    MAIN COMPONENT (Clean + Stable)
 ======================= */
 export default function Index() {
-  const { products, pageInfo, q } = useLoaderData();
+  // const { products, pageInfo, q } = useLoaderData();
+  const { products, pageInfo, q, page } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
 
@@ -605,51 +638,35 @@ export default function Index() {
         <br />
 
         {/* PAGINATION (Stable) */}
-        <InlineStack align="space-between" gap="300">
-         <Button
-  disabled={cursorStack.length === 0}
-  onClick={() => {
-    cancelEdit();
+        {/* PAGINATION (Page Based) */}
+<InlineStack align="space-between" gap="300">
 
-    if (cursorStack.length === 0) return;
+  <Button
+    disabled={!pageInfo?.hasPreviousPage || page <= 1}
+    onClick={() => {
+      cancelEdit();
+      navigate(`?q=${q || ""}&page=${page - 1}`);
+    }}
+  >
+    Previous
+  </Button>
 
-    const prevAfter = cursorStack[cursorStack.length - 1];
+  <Text as="p" variant="bodySm" tone="subdued">
+    Page {page}
+  </Text>
 
-    setCursorStack((s) => s.slice(0, -1));
+  <Button
+    disabled={!pageInfo?.hasNextPage}
+    variant="primary"
+    onClick={() => {
+      cancelEdit();
+      navigate(`?q=${q || ""}&page=${page + 1}`);
+    }}
+  >
+    Next
+  </Button>
 
-    submit(
-      { q, after: prevAfter },
-      { method: "get" }
-    );
-  }}
->
-  Previous
-</Button>
-
-<Button
-  disabled={!pageInfo?.hasNextPage || products.length === 0}
-  variant="primary"
-  onClick={() => {
-    cancelEdit();
-
-    if (!products.length) return;
-
-    const currentAfter =
-      new URLSearchParams(window.location.search).get("after") || "";
-
-    setCursorStack((s) => [...s, currentAfter]);
-
-    const nextAfter = products[products.length - 1].cursor;
-
-    submit(
-      { q, after: nextAfter },
-      { method: "get" }
-    );
-  }}
->
-  Next
-</Button>
-        </InlineStack>
+</InlineStack>
       </Card>
     </Page>
   );

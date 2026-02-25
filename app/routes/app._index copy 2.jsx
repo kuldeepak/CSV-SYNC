@@ -591,32 +591,30 @@ export default function Index() {
 
         <br />
 
-        <InlineStack align="space-between" gap="300">
-      <Button
-        disabled={!pageInfo?.hasPreviousPage || page <= 1}
-        onClick={() => {
-          cancelEdit();
-          navigate(buildUrl({ q, page: page - 1 }));
-        }}
-      >
-        Previous
-      </Button>
+       <InlineStack align="space-between" gap="300">
 
-      <Text as="p" variant="bodySm" tone="subdued">
-        Page {page}
-      </Text>
+  <Button
+    disabled={!pageInfo?.hasPreviousPage || page <= 1}
+    onClick={() => {
+      cancelEdit();
+      navigate(buildUrl({ q, page: page - 1 }));
+    }}
+  >
+    Previous
+  </Button>
 
-      <Button
-        disabled={!pageInfo?.hasNextPage}
-        variant="primary"
-        onClick={() => {
-          cancelEdit();
-          navigate(buildUrl({ q, page: page + 1 }));
-        }}
-      >
-        Next
-      </Button>
-    </InlineStack>
+  <Button
+    disabled={!pageInfo?.hasNextPage}
+    variant="primary"
+    onClick={() => {
+      cancelEdit();
+      navigate(buildUrl({ q, page: page + 1 }));
+    }}
+  >
+    Next
+  </Button>
+
+</InlineStack>
       </Card>
     </Page>
   );
