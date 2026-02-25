@@ -311,14 +311,16 @@ export default function Index() {
 
 
 
-  const lastCursor = useMemo(() => {
+ 
+  const { products, pageInfo, q, after } = useLoaderData();
+  const navigate = useNavigate();
+  const submit = useSubmit();
+
+   const lastCursor = useMemo(() => {
   return products?.length
     ? products[products.length - 1].cursor
     : null;
 }, [products]);
-  const { products, pageInfo, q, after } = useLoaderData();
-  const navigate = useNavigate();
-  const submit = useSubmit();
 
 
   
