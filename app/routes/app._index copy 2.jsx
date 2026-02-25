@@ -68,79 +68,87 @@ export const loader = async ({ request }) => {
   const qParam = url.searchParams.get("q") || "";
   const query = buildProductsQuery(qParam);
 
-  const after = url.searchParams.get("after");
-  const before = url.searchParams.get("before");
+  const page = toPositiveInt(url.searchParams.get("page"), 1);
 
   const PAGE_SIZE = 10;
+  const MAX_FETCH = 500;
+  const FETCH_BATCH = 100;
 
-  const res = await admin.graphql(
-    `query Products(
-      $first: Int
-      $last: Int
-      $after: String
-      $before: String
-      $query: String
-    ) {
-      products(
-        first: $first
-        last: $last
-        after: $after
-        before: $before
-        query: $query
-      ) {
-        edges {
-          cursor
-          node {
-            id
-            title
-            status
-            totalInventory
-            variants(first: 50) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  price
-                  inventoryQuantity
-                  inventoryItem { id }
+  let allEdges = [];
+  let after = null;
+
+  while (allEdges.length < MAX_FETCH) {
+    const first = Math.min(FETCH_BATCH, MAX_FETCH - allEdges.length);
+
+    const res = await admin.graphql(
+      `query Products($first: Int!, $after: String, $query: String) {
+        products(first: $first, after: $after, query: $query) {
+          edges {
+            cursor
+            node {
+              id
+              title
+              status
+              totalInventory
+              variants(first: 50) {
+                edges {
+                  node {
+                    id
+                    title
+                    sku
+                    price
+                    inventoryQuantity
+                    inventoryItem { id }
+                  }
                 }
               }
+              featuredImage { url }
             }
-            featuredImage { url }
           }
+          pageInfo { hasNextPage }
         }
+      }`,
+      { variables: { first, after, query } }
+    );
 
-        pageInfo {
-          hasNextPage
-          hasPreviousPage
-        }
-      }
-    }`,
-    {
-      variables: before
-        ? {
-            last: PAGE_SIZE,
-            before,
-            query,
-          }
-        : {
-            first: PAGE_SIZE,
-            after,
-            query,
-          },
-    }
-  );
+    const data = await res.json();
+    const conn = data?.data?.products;
 
-  const data = await res.json();
+    const edges = conn?.edges || [];
+    allEdges = allEdges.concat(edges);
 
-  const edges = data?.data?.products?.edges || [];
-  const pageInfo = data?.data?.products?.pageInfo || {};
+    const hasNext = conn?.pageInfo?.hasNextPage;
+    after = edges.length ? edges[edges.length - 1].cursor : null;
+
+    if (!hasNext || !after || edges.length === 0) break;
+  }
+
+  // Global low-stock sort (Already present, kept as is)
+  allEdges.sort((a, b) => {
+    const ai = Number(a?.node?.totalInventory);
+    const bi = Number(b?.node?.totalInventory);
+    const aVal = Number.isFinite(ai) ? ai : Number.POSITIVE_INFINITY;
+    const bVal = Number.isFinite(bi) ? bi : Number.POSITIVE_INFINITY;
+    return aVal - bVal;
+  });
+
+  const total = allEdges.length;
+  const start = (page - 1) * PAGE_SIZE;
+  const end = start + PAGE_SIZE;
+
+  const pageEdges = allEdges.slice(start, end);
+  const pageInfo = {
+    hasPreviousPage: page > 1,
+    hasNextPage: end < total,
+  };
 
   return json({
-    products: edges,
+    products: pageEdges,
     pageInfo,
     q: qParam,
+    page,
+    totalFetched: total,
+    capped: total >= MAX_FETCH,
   });
 };
 
@@ -335,15 +343,12 @@ export default function Index() {
   const [search, setSearch] = useState(q || "");
   useEffect(() => setSearch(q || ""), [q]);
 
- const buildUrl = ({ q, after, before }) => {
-  const sp = new URLSearchParams();
-
-  if (q) sp.set("q", q);
-  if (after) sp.set("after", after);
-  if (before) sp.set("before", before);
-
-  return `?${sp.toString()}`;
-};
+  const buildUrl = ({ q, page }) => {
+    const sp = new URLSearchParams();
+    if (q) sp.set("q", q);
+    sp.set("page", String(page || 1));
+    return `?${sp.toString()}`;
+  };
 
   const isEditing = (scope, id, field) =>
     editingCell?.scope === scope && editingCell?.id === id && editingCell?.field === field;
@@ -587,43 +592,31 @@ export default function Index() {
         <br />
 
         <InlineStack align="space-between" gap="300">
-  <Button
-    disabled={!pageInfo?.hasPreviousPage}
-    onClick={() => {
-      cancelEdit();
+      <Button
+        disabled={!pageInfo?.hasPreviousPage || page <= 1}
+        onClick={() => {
+          cancelEdit();
+          navigate(buildUrl({ q, page: page - 1 }));
+        }}
+      >
+        Previous
+      </Button>
 
-      if (!products.length) return;
+      <Text as="p" variant="bodySm" tone="subdued">
+        Page {page}
+      </Text>
 
-      navigate(
-        buildUrl({
-          q,
-          before: products[0].cursor,
-        })
-      );
-    }}
-  >
-    Previous
-  </Button>
-
-  <Button
-    disabled={!pageInfo?.hasNextPage}
-    variant="primary"
-    onClick={() => {
-      cancelEdit();
-
-      if (!products.length) return;
-
-      navigate(
-        buildUrl({
-          q,
-          after: products[products.length - 1].cursor,
-        })
-      );
-    }}
-  >
-    Next
-  </Button>
-</InlineStack>
+      <Button
+        disabled={!pageInfo?.hasNextPage}
+        variant="primary"
+        onClick={() => {
+          cancelEdit();
+          navigate(buildUrl({ q, page: page + 1 }));
+        }}
+      >
+        Next
+      </Button>
+    </InlineStack>
       </Card>
     </Page>
   );
