@@ -2,7 +2,7 @@
 
 client_id = "ba0e515a6b1fd4fb1d38622692df53b4"
 name = "csv-sync"
-application_url = "https://example.com"
+application_url = "https://syncify-app-fvv2u.ondigitalocean.app"
 embedded = true
 
 [build]
@@ -24,4 +24,4 @@ api_version = "2026-04"
 scopes = "read_products,write_products,read_inventory,write_inventory,read_locations"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://syncify-app-fvv2u.ondigitalocean.app/api/auth" ]
