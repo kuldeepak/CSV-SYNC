@@ -264,4 +264,4 @@ export async function loader() {
 runOnce();
 
 // Run every minute
-cron.schedule("* * * * *", runOnce);
+cron.schedule("*/5 * * * *", runOnce);
