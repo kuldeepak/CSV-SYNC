@@ -2,6 +2,8 @@ import { json } from "@remix-run/node";
 import { useLoaderData, useNavigate, useSubmit } from "@remix-run/react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { authenticate } from "../shopify.server";
+import { useNavigation } from "@remix-run/react";
+
 import {
   Page,
   Card,
@@ -11,6 +13,7 @@ import {
   Badge,
   Text,
   TextField,
+  Spinner,
 } from "@shopify/polaris";
 
 /* =======================
@@ -312,19 +315,22 @@ export default function Index() {
 
 
 
- 
+
   const { products, pageInfo, q, after } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
 
-   const lastCursor = useMemo(() => {
-  return products?.length
-    ? products[products.length - 1].cursor
-    : null;
-}, [products]);
+  const navigation = useNavigation();
+  const isLoading = navigation.state === "loading";
+
+  const lastCursor = useMemo(() => {
+    return products?.length
+      ? products[products.length - 1].cursor
+      : null;
+  }, [products]);
 
 
-  
+
   // ✅ cursor history for Previous button (stable)
   const [cursorStack, setCursorStack] = useState([]);
 
@@ -341,13 +347,13 @@ export default function Index() {
   }, [q]);
 
   const buildUrl = ({ q, after }) => {
-  const sp = new URLSearchParams();
+    const sp = new URLSearchParams();
 
-  if (q) sp.set("q", q);
-  if (after) sp.set("after", after);
+    if (q) sp.set("q", q);
+    if (after) sp.set("after", after);
 
-  return `?${sp.toString()}`;
-};
+    return `?${sp.toString()}`;
+  };
 
   const isEditing = (scope, id, field) =>
     editingCell?.scope === scope &&
@@ -410,6 +416,7 @@ export default function Index() {
             <InlineStack gap="200">
               <Button
                 variant="primary"
+                loading={isLoading}   // ✅ ADD
                 onClick={() => navigate(buildUrl({ q: search.trim() || "" }))}
               >
                 Search
@@ -626,44 +633,46 @@ export default function Index() {
 
         {/* PAGINATION (Stable) */}
         {/* PAGINATION (Page Based) */}
-<InlineStack align="space-between" gap="300">
+        <InlineStack align="space-between" gap="300">
 
-  {/* Previous */}
-  <Button
-    disabled={cursorStack.length === 0}
-    onClick={() => {
-      cancelEdit();
+          {/* Previous */}
+          <Button
+            disabled={cursorStack.length === 0 || isLoading}
+            loading={isLoading}
+            onClick={() => {
+              cancelEdit();
 
-      const prev = cursorStack[cursorStack.length - 1];
+              const prev = cursorStack[cursorStack.length - 1];
 
-      setCursorStack((s) => s.slice(0, -1));
+              setCursorStack((s) => s.slice(0, -1));
 
-      navigate(buildUrl({ q: q || "", after: prev || "" }));
-    }}
-  >
-    Previous
-  </Button>
+              navigate(buildUrl({ q: q || "", after: prev || "" }));
+            }}
+          >
+            Previous
+          </Button>
 
-  <Text as="p" variant="bodySm" tone="subdued">
-    {cursorStack.length + 1}
-  </Text>
+          <Text as="p" variant="bodySm" tone="subdued">
+            {cursorStack.length + 1}
+          </Text>
 
-  {/* Next */}
-  <Button
-    disabled={!pageInfo?.hasNextPage}
-    variant="primary"
-    onClick={() => {
-      cancelEdit();
+          {/* Next */}
+          <Button
+            disabled={!pageInfo?.hasNextPage || isLoading}
+            loading={isLoading}
+            variant="primary"
+            onClick={() => {
+              cancelEdit();
 
-      setCursorStack((s) => [...s, after]);
+              setCursorStack((s) => [...s, after]);
 
-      navigate(buildUrl({ q: q || "", after: lastCursor }));
-    }}
-  >
-    Next
-  </Button>
+              navigate(buildUrl({ q: q || "", after: lastCursor }));
+            }}
+          >
+            Next
+          </Button>
 
-</InlineStack>
+        </InlineStack>
       </Card>
     </Page>
   );
