@@ -377,20 +377,33 @@ const isPageLoading =
     submit({ type: "delete", productId }, { method: "post" });
 
   // ✅ unified qty source (badge + inventory same)
-  const getRowInfo = (node) => {
-    const variants = node.variants.edges.map((e) => e.node);
-    const firstVariant = variants[0];
+ const getRowInfo = (node) => {
+  let variants = node.variants.edges.map((e) => e.node);
 
-    const hasRealVariants =
-      variants.length > 1 || firstVariant?.title !== "Default Title";
+  // ✅ If search exists, filter variants by SKU match
+  if (q && !q.includes(":")) {
+    const searchLower = q.toLowerCase();
 
-    const qty = hasRealVariants
-      ? Number(node.totalInventory ?? 0)
-      : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
+    const filtered = variants.filter((v) =>
+      v.sku?.toLowerCase().includes(searchLower)
+    );
 
-    return { variants, firstVariant, hasRealVariants, qty };
-  };
+    if (filtered.length > 0) {
+      variants = filtered;
+    }
+  }
 
+  const firstVariant = variants[0];
+
+  const hasRealVariants =
+    variants.length > 1 || firstVariant?.title !== "Default Title";
+
+  const qty = hasRealVariants
+    ? variants.reduce((sum, v) => sum + Number(v.inventoryQuantity || 0), 0)
+    : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
+
+  return { variants, firstVariant, hasRealVariants, qty };
+};
   return (
     <>
     {isPageLoading && (

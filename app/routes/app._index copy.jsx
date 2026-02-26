@@ -2,6 +2,8 @@ import { json } from "@remix-run/node";
 import { useLoaderData, useNavigate, useSubmit } from "@remix-run/react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { authenticate } from "../shopify.server";
+import { useNavigation } from "@remix-run/react";
+
 import {
   Page,
   Card,
@@ -11,6 +13,7 @@ import {
   Badge,
   Text,
   TextField,
+  Spinner,
 } from "@shopify/polaris";
 
 /* =======================
@@ -68,93 +71,66 @@ export const loader = async ({ request }) => {
   const url = new URL(request.url);
 
   const qParam = url.searchParams.get("q") || "";
-  const query = buildProductsQuery(qParam);
+  const after = url.searchParams.get("after") || null;
 
-  const page = toPositiveInt(url.searchParams.get("page"), 1);
+  const query = buildProductsQuery(qParam);
 
   const PAGE_SIZE = 10;
 
-  // Convert page → cursor offset
-  const offset = (page - 1) * PAGE_SIZE;
-
-  let after = null;
-  let skipped = 0;
-  let edges = [];
-
-  while (skipped < offset + PAGE_SIZE) {
-    const res = await admin.graphql(
-      `query Products($first: Int!, $after: String, $query: String) {
-        products(
-          first: $first
-          after: $after
-          query: $query
-          sortKey: INVENTORY_TOTAL
-          reverse: false
-        ) {
-          edges {
-            cursor
-            node {
-              id
-              title
-              status
-              totalInventory
-              variants(first: 50) {
-                edges {
-                  node {
-                    id
-                    title
-                    sku
-                    price
-                    inventoryQuantity
-                    inventoryItem { id }
-                  }
+  const res = await admin.graphql(
+    `query Products($first: Int!, $after: String, $query: String) {
+      products(
+        first: $first
+        after: $after
+        query: $query
+        sortKey: INVENTORY_TOTAL
+        reverse: false
+      ) {
+        edges {
+          cursor
+          node {
+            id
+            title
+            status
+            totalInventory
+            variants(first: 50) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  price
+                  inventoryQuantity
+                  inventoryItem { id }
                 }
               }
-              featuredImage { url }
             }
-          }
-          pageInfo {
-            hasNextPage
+            featuredImage { url }
           }
         }
-      }`,
-      {
-        variables: {
-          first: PAGE_SIZE,
-          after,
-          query,
-        },
+        pageInfo {
+          hasNextPage
+        }
       }
-    );
-
-    const data = await res.json();
-    const conn = data?.data?.products;
-
-    if (!conn?.edges?.length) break;
-
-    after = conn.edges[conn.edges.length - 1].cursor;
-
-    if (skipped >= offset) {
-      edges = conn.edges;
-      break;
+    }`,
+    {
+      variables: {
+        first: PAGE_SIZE,
+        after,
+        query,
+      },
     }
+  );
 
-    skipped += conn.edges.length;
-
-    if (!conn.pageInfo.hasNextPage) break;
-  }
+  const data = await res.json();
 
   return json({
-    products: edges,
-    page,
-    pageInfo: {
-      hasPreviousPage: page > 1,
-      hasNextPage: edges.length === PAGE_SIZE,
-    },
+    products: data.data.products.edges,
+    pageInfo: data.data.products.pageInfo,
     q: qParam,
+    after,
   });
 };
-
 /* =======================
    ACTION
 ======================= */
@@ -330,17 +306,32 @@ function InlineEditable({
   );
 }
 
+
 /* =======================
    MAIN COMPONENT (Clean + Stable)
 ======================= */
 export default function Index() {
   // const { products, pageInfo, q } = useLoaderData();
-  const { products, pageInfo, q, page } = useLoaderData();
+
+
+
+
+  const { products, pageInfo, q, after } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
 
+ const navigation = useNavigation();
+const isPageLoading =
+  navigation.state === "loading" || navigation.state === "submitting";
 
-  
+  const lastCursor = useMemo(() => {
+    return products?.length
+      ? products[products.length - 1].cursor
+      : null;
+  }, [products]);
+
+
+
   // ✅ cursor history for Previous button (stable)
   const [cursorStack, setCursorStack] = useState([]);
 
@@ -358,8 +349,10 @@ export default function Index() {
 
   const buildUrl = ({ q, after }) => {
     const sp = new URLSearchParams();
+
     if (q) sp.set("q", q);
     if (after) sp.set("after", after);
+
     return `?${sp.toString()}`;
   };
 
@@ -399,6 +392,38 @@ export default function Index() {
   };
 
   return (
+    <>
+    {isPageLoading && (
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100vw",
+          height: "100vh",
+          background: "rgba(0,0,0,0.4)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 9999,
+        }}
+      >
+        <div
+          style={{
+            background: "#fff",
+            padding: "40px 60px",
+            borderRadius: 16,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+            textAlign: "center",
+          }}
+        >
+          <Spinner size="large" />
+          <div style={{ marginTop: 16, fontSize: 16, fontWeight: 500 }}>
+            Please wait...
+          </div>
+        </div>
+      </div>
+    )}
     <Page title="Inventory Manager">
       <Card>
         {/* SEARCH */}
@@ -640,35 +665,48 @@ export default function Index() {
 
         {/* PAGINATION (Stable) */}
         {/* PAGINATION (Page Based) */}
-<InlineStack align="space-between" gap="300">
+        <InlineStack align="space-between" gap="300">
 
-  <Button
-    disabled={!pageInfo?.hasPreviousPage || page <= 1}
-    onClick={() => {
-      cancelEdit();
-      navigate(`?q=${q || ""}&page=${page - 1}`);
-    }}
-  >
-    Previous
-  </Button>
+          {/* Previous */}
+          <Button
+            disabled={cursorStack.length === 0}
+            
+            onClick={() => {
+              cancelEdit();
 
-  <Text as="p" variant="bodySm" tone="subdued">
-    Page {page}
-  </Text>
+              const prev = cursorStack[cursorStack.length - 1];
 
-  <Button
-    disabled={!pageInfo?.hasNextPage}
-    variant="primary"
-    onClick={() => {
-      cancelEdit();
-      navigate(`?q=${q || ""}&page=${page + 1}`);
-    }}
-  >
-    Next
-  </Button>
+              setCursorStack((s) => s.slice(0, -1));
 
-</InlineStack>
+              navigate(buildUrl({ q: q || "", after: prev || "" }));
+            }}
+          >
+            Previous
+          </Button>
+
+          <Text as="p" variant="bodySm" tone="subdued">
+            {cursorStack.length + 1}
+          </Text>
+
+          {/* Next */}
+          <Button
+            disabled={!pageInfo?.hasNextPage}
+           
+            variant="primary"
+            onClick={() => {
+              cancelEdit();
+
+              setCursorStack((s) => [...s, after]);
+
+              navigate(buildUrl({ q: q || "", after: lastCursor }));
+            }}
+          >
+            Next
+          </Button>
+
+        </InlineStack>
       </Card>
     </Page>
+    </>
   );
 }
