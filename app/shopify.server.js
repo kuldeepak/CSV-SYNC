@@ -7,6 +7,14 @@ import {
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server.js";
 
+
+try {
+  await prisma.$queryRaw`SELECT 1`;
+  console.log("✅ DB CONNECTED");
+} catch (e) {
+  console.error("❌ DB CONNECTION FAILED", e);
+}
+
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
