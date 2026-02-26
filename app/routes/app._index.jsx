@@ -320,8 +320,9 @@ export default function Index() {
   const navigate = useNavigate();
   const submit = useSubmit();
 
-  const navigation = useNavigation();
-  const isLoading = navigation.state === "loading";
+ const navigation = useNavigation();
+const isPageLoading =
+  navigation.state === "loading" || navigation.state === "submitting";
 
   const lastCursor = useMemo(() => {
     return products?.length
@@ -391,6 +392,38 @@ export default function Index() {
   };
 
   return (
+    <>
+    {isPageLoading && (
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100vw",
+          height: "100vh",
+          background: "rgba(0,0,0,0.4)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 9999,
+        }}
+      >
+        <div
+          style={{
+            background: "#fff",
+            padding: "40px 60px",
+            borderRadius: 16,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+            textAlign: "center",
+          }}
+        >
+          <Spinner size="large" />
+          <div style={{ marginTop: 16, fontSize: 16, fontWeight: 500 }}>
+            Please wait...
+          </div>
+        </div>
+      </div>
+    )}
     <Page title="Inventory Manager">
       <Card>
         {/* SEARCH */}
@@ -416,7 +449,6 @@ export default function Index() {
             <InlineStack gap="200">
               <Button
                 variant="primary"
-                loading={isLoading}   // ✅ ADD
                 onClick={() => navigate(buildUrl({ q: search.trim() || "" }))}
               >
                 Search
@@ -637,8 +669,8 @@ export default function Index() {
 
           {/* Previous */}
           <Button
-            disabled={cursorStack.length === 0 || isLoading}
-            loading={isLoading}
+            disabled={cursorStack.length === 0}
+            
             onClick={() => {
               cancelEdit();
 
@@ -658,8 +690,8 @@ export default function Index() {
 
           {/* Next */}
           <Button
-            disabled={!pageInfo?.hasNextPage || isLoading}
-            loading={isLoading}
+            disabled={!pageInfo?.hasNextPage}
+           
             variant="primary"
             onClick={() => {
               cancelEdit();
@@ -675,5 +707,6 @@ export default function Index() {
         </InlineStack>
       </Card>
     </Page>
+    </>
   );
 }
