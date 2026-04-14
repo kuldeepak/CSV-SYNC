@@ -2,6 +2,7 @@ import { json } from "@remix-run/node";
 import { useLoaderData, useNavigate, useSubmit } from "@remix-run/react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { authenticate } from "../shopify.server";
+import db from "../db.server";
 import { useNavigation } from "@remix-run/react";
 
 import {
@@ -67,7 +68,8 @@ function toPositiveInt(v, fallback = 1) {
 }
 
 export const loader = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
   const url = new URL(request.url);
 
   const qParam = url.searchParams.get("q") || "";
@@ -119,13 +121,36 @@ export const loader = async ({ request }) => {
         after,
         query,
       },
-    }
+    },
   );
 
   const data = await res.json();
+  // 🟢 Collect product IDs from Shopify response
+  const productIds = data.data.products.edges.map((e) => e.node.id);
+
+  // 🟢 Fetch warehouses from your DB
+  const warehouses = await db.externalWarehouse.findMany({
+    where: {
+      productId: { in: productIds },
+    },
+  });
+
+  // 🟢 Convert to lookup map
+  const warehouseMap = Object.fromEntries(
+    warehouses.map((w) => [w.productId, w.warehouse]),
+  );
+
+  // 🟢 Attach warehouse to each product
+  const productsWithWarehouse = data.data.products.edges.map((edge) => ({
+    ...edge,
+    node: {
+      ...edge.node,
+      externalWarehouse: warehouseMap[edge.node.id] || "",
+    },
+  }));
 
   return json({
-    products: data.data.products.edges,
+    products: productsWithWarehouse,
     pageInfo: data.data.products.pageInfo,
     q: qParam,
     after,
@@ -144,7 +169,7 @@ export const action = async ({ request }) => {
       `mutation productDelete($id: ID!) {
         productDelete(input: { id: $id }) { deletedProductId }
       }`,
-      { variables: { id: form.get("productId") } }
+      { variables: { id: form.get("productId") } },
     );
     return json({ success: true });
   }
@@ -161,7 +186,7 @@ export const action = async ({ request }) => {
           userErrors { field message }
         }
       }`,
-      { variables: { productId, variants: [{ id: variantId, price }] } }
+      { variables: { productId, variants: [{ id: variantId, price }] } },
     );
 
     const d = await result.json();
@@ -182,14 +207,16 @@ export const action = async ({ request }) => {
           }
         }
       }`,
-      { variables: { id: inventoryItemId } }
+      { variables: { id: inventoryItemId } },
     );
 
     const locData = await locRes.json();
     const locationId =
-      locData.data?.inventoryItem?.inventoryLevels?.edges[0]?.node?.location?.id;
+      locData.data?.inventoryItem?.inventoryLevels?.edges[0]?.node?.location
+        ?.id;
 
-    if (!locationId) return json({ success: false, error: "Location not found" });
+    if (!locationId)
+      return json({ success: false, error: "Location not found" });
 
     const invRes = await admin.graphql(
       `mutation inventorySet($input: InventorySetQuantitiesInput!) {
@@ -206,12 +233,33 @@ export const action = async ({ request }) => {
             quantities: [{ inventoryItemId, locationId, quantity }],
           },
         },
-      }
+      },
     );
 
     const invData = await invRes.json();
     const errors = invData.data?.inventorySetQuantities?.userErrors;
     if (errors?.length) return json({ success: false, errors });
+    return json({ success: true });
+  }
+
+  /* =======================
+   SAVE EXTERNAL WAREHOUSE
+======================= */
+  if (type === "external-warehouse") {
+    const { session } = await authenticate.admin(request);
+    const shop = session.shop;
+
+    const productId = form.get("productId");
+    const warehouse = form.get("warehouse");
+
+    await db.externalWarehouse.upsert({
+      where: {
+        shop_productId: { shop, productId },
+      },
+      update: { warehouse },
+      create: { shop, productId, warehouse },
+    });
+
     return json({ success: true });
   }
 
@@ -221,7 +269,11 @@ export const action = async ({ request }) => {
 /* =======================
    STYLES
 ======================= */
-const tableStyle = { width: "100%", borderCollapse: "collapse", fontSize: "14px" };
+const tableStyle = {
+  width: "100%",
+  borderCollapse: "collapse",
+  fontSize: "14px",
+};
 const thStyle = {
   textAlign: "left",
   padding: "10px 12px",
@@ -287,10 +339,13 @@ function InlineEditable({
         cursor: "pointer",
         padding: "4px 6px",
         borderRadius: 6,
-        border: "1px solid transparent",
+        border: "1px solid #e1e3e5",
         transition: "all 0.15s",
         display: "inline-block",
         minWidth: 60,
+        background: "#f6f6f7",
+        height: "30px",
+        textAlign: "center",
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.border = "1px solid #bbb";
@@ -306,37 +361,30 @@ function InlineEditable({
   );
 }
 
-
 /* =======================
    MAIN COMPONENT (Clean + Stable)
 ======================= */
 export default function Index() {
   // const { products, pageInfo, q } = useLoaderData();
 
-
-
-
   const { products, pageInfo, q, after } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
 
- const navigation = useNavigation();
-const isPageLoading =
-  navigation.state === "loading" || navigation.state === "submitting";
+  const navigation = useNavigation();
+  const isPageLoading =
+    navigation.state === "loading" || navigation.state === "submitting";
 
   const lastCursor = useMemo(() => {
-    return products?.length
-      ? products[products.length - 1].cursor
-      : null;
+    return products?.length ? products[products.length - 1].cursor : null;
   }, [products]);
-
-
 
   // ✅ cursor history for Previous button (stable)
   const [cursorStack, setCursorStack] = useState([]);
 
   const [openVariantProductId, setOpenVariantProductId] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
+  const [tempWarehouse2, setTempWarehouse2] = useState({});
 
   // Search UI
   const [search, setSearch] = useState(q || "");
@@ -365,361 +413,499 @@ const isPageLoading =
   const cancelEdit = () => setEditingCell(null);
 
   const saveProductPrice = (productId, variantId, rawPrice) => {
-    const price = String(rawPrice || "").replace("₹", "").trim();
-    submit({ type: "variant-price", productId, variantId, price }, { method: "post" });
+    const price = String(rawPrice || "")
+      .replace("₹", "")
+      .trim();
+    submit(
+      { type: "variant-price", productId, variantId, price },
+      { method: "post" },
+    );
   };
 
   const saveInventoryByInventoryItem = (inventoryItemId, quantity) => {
-    submit({ type: "variant-inventory", inventoryItemId, quantity }, { method: "post" });
+    submit(
+      { type: "variant-inventory", inventoryItemId, quantity },
+      { method: "post" },
+    );
   };
+
+  const saveWarehouse = (productId, warehouse) => {
+    submit(
+      { type: "external-warehouse", productId, warehouse },
+      { method: "post" },
+    );
+  };
+
+//   const saveWarehouse2Local = (productId, value) => {
+//   setTempWarehouse2((prev) => ({
+//     ...prev,
+//     [productId]: value,
+//   }));
+// };
+
+const transferFromExternalWarehouse = async (
+  productId,
+  inventoryItemId,
+  shopifyQty,
+  externalQty,
+  transferQty
+) => {
+  const moveQty = Number(transferQty) || 0;
+  if (moveQty <= 0) return;
+
+  if (moveQty > externalQty) {
+    alert("Not enough stock in External Warehouse");
+    return;
+  }
+
+  const newShopifyQty = shopifyQty + moveQty;
+  const newExternalQty = externalQty - moveQty;
+
+  // 1️⃣ Update Shopify inventory FIRST
+  submit(
+    {
+      type: "variant-inventory",
+      inventoryItemId,
+      quantity: newShopifyQty,
+    },
+    { method: "post" }
+  );
+
+  // ⏱️ Wait 500ms, then update external warehouse
+  setTimeout(() => {
+    // 2️⃣ Update DB external warehouse
+    submit(
+      {
+        type: "external-warehouse",
+        productId,
+        warehouse: newExternalQty,
+      },
+      { method: "post" }
+    );
+
+    // 3️⃣ Reset NEW warehouse field to 0
+    setTempWarehouse2((prev) => ({
+      ...prev,
+      [productId]: "",
+    }));
+  }, 500);
+};
 
   const deleteProduct = (productId) =>
     submit({ type: "delete", productId }, { method: "post" });
 
   // ✅ unified qty source (badge + inventory same)
- const getRowInfo = (node) => {
-  let variants = node.variants.edges.map((e) => e.node);
+  const getRowInfo = (node) => {
+    let variants = node.variants.edges.map((e) => e.node);
 
-  // ✅ If search exists, filter variants by SKU match
-  if (q && !q.includes(":")) {
-    const searchLower = q.toLowerCase();
+    // ✅ If search exists, filter variants by SKU match
+    if (q && !q.includes(":")) {
+      const searchLower = q.toLowerCase();
 
-    const filtered = variants.filter((v) =>
-      v.sku?.toLowerCase().includes(searchLower)
-    );
+      const filtered = variants.filter((v) =>
+        v.sku?.toLowerCase().includes(searchLower),
+      );
 
-    if (filtered.length > 0) {
-      variants = filtered;
+      if (filtered.length > 0) {
+        variants = filtered;
+      }
     }
-  }
 
-  const firstVariant = variants[0];
+    const firstVariant = variants[0];
 
-  const hasRealVariants =
-    variants.length > 1 || firstVariant?.title !== "Default Title";
+    const hasRealVariants =
+      variants.length > 1 || firstVariant?.title !== "Default Title";
 
-  const qty = hasRealVariants
-    ? variants.reduce((sum, v) => sum + Number(v.inventoryQuantity || 0), 0)
-    : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
+    const qty = hasRealVariants
+      ? variants.reduce((sum, v) => sum + Number(v.inventoryQuantity || 0), 0)
+      : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
 
-  return { variants, firstVariant, hasRealVariants, qty };
-};
+    return { variants, firstVariant, hasRealVariants, qty };
+  };
   return (
     <>
-    {isPageLoading && (
-      <div
-        style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          width: "100vw",
-          height: "100vh",
-          background: "rgba(0,0,0,0.4)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 9999,
-        }}
-      >
+      {isPageLoading && (
         <div
           style={{
-            background: "#fff",
-            padding: "40px 60px",
-            borderRadius: 16,
-            boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
-            textAlign: "center",
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
           }}
         >
-          <Spinner size="large" />
-          <div style={{ marginTop: 16, fontSize: 16, fontWeight: 500 }}>
-            Please wait...
-          </div>
-        </div>
-      </div>
-    )}
-    <Page title="Inventory Manager">
-      <Card>
-        {/* SEARCH */}
-        <div style={{ padding: 16, borderBottom: "1px solid #e1e3e5" }}>
-          <InlineStack gap="300" align="space-between">
-            <div style={{ flex: 1, minWidth: 280 }}>
-              <TextField
-                label="Search by Title or SKU"
-                labelHidden
-                placeholder='Search... (e.g. "Nike" or "sku:ABC123")'
-                value={search}
-                onChange={setSearch}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    navigate(buildUrl({ q: search.trim() || "" }));
-                  }
-                }}
-                clearButton
-                onClearButtonClick={() => navigate(`.`)}
-              />
+          <div
+            style={{
+              background: "#fff",
+              padding: "40px 60px",
+              borderRadius: 16,
+              boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+              textAlign: "center",
+            }}
+          >
+            <Spinner size="large" />
+            <div style={{ marginTop: 16, fontSize: 16, fontWeight: 500 }}>
+              Please wait...
             </div>
-
-            <InlineStack gap="200">
-              <Button
-                variant="primary"
-                onClick={() => navigate(buildUrl({ q: search.trim() || "" }))}
-              >
-                Search
-              </Button>
-              <Button disabled={!q} onClick={() => navigate(buildUrl({ q: "" }))}>
-                Clear
-              </Button>
-            </InlineStack>
-          </InlineStack>
-
-          <div style={{ marginTop: 8 }}>
-            <Text as="p" variant="bodySm" tone="subdued">
-              Sorted: Low → Medium → Healthy (by total inventory)
-              {q ? (
-                <>
-                  {" "}
-                  | Query: <strong>{q}</strong>
-                </>
-              ) : null}
-            </Text>
           </div>
         </div>
+      )}
+      <Page title="Inventory Manager">
+        <Card>
+          {/* SEARCH */}
+          <div style={{ padding: 16, borderBottom: "1px solid #e1e3e5" }}>
+            <InlineStack gap="300" align="space-between">
+              <div style={{ flex: 1, minWidth: 280 }}>
+                <TextField
+                  label="Search by Title or SKU"
+                  labelHidden
+                  placeholder='Search... (e.g. "Nike" or "sku:ABC123")'
+                  value={search}
+                  onChange={setSearch}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      navigate(buildUrl({ q: search.trim() || "" }));
+                    }
+                  }}
+                  clearButton
+                  onClearButtonClick={() => navigate(`.`)}
+                />
+              </div>
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={tableStyle}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Image</th>
-                <th style={thStyle}>Title</th>
-                <th style={thStyle}>Status</th>
-                <th style={thStyle}>Stock Level</th>
-                <th style={thStyle}>Price</th>
-                <th style={thStyle}>Inventory</th>
-                <th style={thStyle}>Actions</th>
-              </tr>
-            </thead>
+              <InlineStack gap="200">
+                <Button
+                  variant="primary"
+                  onClick={() => navigate(buildUrl({ q: search.trim() || "" }))}
+                >
+                  Search
+                </Button>
+                <Button
+                  disabled={!q}
+                  onClick={() => navigate(buildUrl({ q: "" }))}
+                >
+                  Clear
+                </Button>
+              </InlineStack>
+            </InlineStack>
 
-            <tbody>
-              {products.map(({ node, cursor }) => {
-                const { variants, firstVariant, hasRealVariants, qty } = getRowInfo(node);
-                const isOpen = openVariantProductId === node.id;
-                const stockStatus = getStockStatus(qty);
+            <div style={{ marginTop: 8 }}>
+              <Text as="p" variant="bodySm" tone="subdued">
+                Sorted: Low → Medium → Healthy (by total inventory)
+                {q ? (
+                  <>
+                    {" "}
+                    | Query: <strong>{q}</strong>
+                  </>
+                ) : null}
+              </Text>
+            </div>
+          </div>
 
-                // ✅ Only allow “row inventory edit” for single-variant products
-                const canEditRowInventory = !hasRealVariants;
+          <div style={{ overflowX: "auto" }}>
+            <table style={tableStyle}>
+              <thead>
+                <tr>
+                  <th style={thStyle}>Title</th>
+                  
+                  <th style={thStyle}>Price</th>
+                  <th style={thStyle}>Inventory</th>
+                  <th style={thStyle}>external warehouse</th>
+                  <th style={thStyle}>external Warehouse new</th>
+                  <th style={thStyle}>Actions</th>
+                </tr>
+              </thead>
 
-                return (
-                  <Fragment key={node.id}>
-                    <tr>
-                      <td style={tdStyle}>
-                        <Thumbnail
-                          source={node.featuredImage?.url || ""}
-                          size="small"
-                          alt={node.title}
-                        />
-                      </td>
+              <tbody>
+                {products.map(({ node, cursor }) => {
+                  const { variants, firstVariant, hasRealVariants, qty } =
+                    getRowInfo(node);
+                  const isOpen = openVariantProductId === node.id;
+                  const warehouseQty = Number(node.externalWarehouse) || 0;
+                  const remainingQty = qty - warehouseQty;
 
-                      <td style={{ ...tdStyle, minWidth: 220 }}>
-                        <Text as="p" variant="bodyMd">
-                          {node.title}
-                        </Text>
-                      </td>
+                  // ✅ Only allow “row inventory edit” for single-variant products
+                  const canEditRowInventory = !hasRealVariants;
 
-                      <td style={tdStyle}>
-                        <Badge tone={node.status === "ACTIVE" ? "success" : undefined}>
-                          {node.status}
-                        </Badge>
-                      </td>
+                  return (
+                    <Fragment key={node.id}>
+                      <tr>
+                        <td style={{ ...tdStyle, minWidth: 220 }}>
+                          <Text as="p" variant="bodyMd">
+                            {node.title}
+                          </Text>
+                        </td>
 
-                      <td style={tdStyle}>
-                        <Badge tone={stockStatus.tone}>{stockStatus.label}</Badge>
-                      </td>
-
-                      <td style={{ ...tdStyle, minWidth: 120 }}>
-                        <InlineEditable
-                          value={firstVariant?.price ? `₹${firstVariant.price}` : "—"}
-                          editing={isEditing("product", node.id, "price")}
-                          onStartEdit={() => startEdit("product", node.id, "price")}
-                          onCancelEdit={cancelEdit}
-                          onSave={(v) => saveProductPrice(node.id, firstVariant?.id, v)}
-                          type="text"
-                        />
-                      </td>
-
-                      <td style={{ ...tdStyle, minWidth: 110 }}>
-                        {canEditRowInventory ? (
+                        <td style={{ ...tdStyle, minWidth: 120 }}>
                           <InlineEditable
-                            value={String(qty)}
-                            editing={isEditing("product", node.id, "inventory")}
-                            onStartEdit={() => startEdit("product", node.id, "inventory")}
+                            value={
+                              firstVariant?.price
+                                ? `₹${firstVariant.price}`
+                                : "—"
+                            }
+                            editing={isEditing("product", node.id, "price")}
+                            onStartEdit={() =>
+                              startEdit("product", node.id, "price")
+                            }
                             onCancelEdit={cancelEdit}
                             onSave={(v) =>
-                              saveInventoryByInventoryItem(firstVariant?.inventoryItem?.id, v)
+                              saveProductPrice(node.id, firstVariant?.id, v)
                             }
-                            type="number"
+                            type="text"
                           />
-                        ) : (
-                          <Text as="p">{String(qty)}</Text>
-                        )}
-                      </td>
+                        </td>
 
-                      <td style={{ ...tdStyle, minWidth: 260 }}>
-                        <InlineStack gap="200">
-                          {hasRealVariants && (
-                            <Button
-                              size="slim"
-                              onClick={() => {
-                                cancelEdit();
-                                setOpenVariantProductId(isOpen ? null : node.id);
-                              }}
-                            >
-                              {isOpen ? "Hide Variants" : "Variants"}
-                            </Button>
+                        <td style={{ ...tdStyle, minWidth: 110 }}>
+                          {canEditRowInventory ? (
+                            <InlineEditable
+                              value={String(qty)}
+                              editing={isEditing(
+                                "product",
+                                node.id,
+                                "inventory",
+                              )}
+                              onStartEdit={() =>
+                                startEdit("product", node.id, "inventory")
+                              }
+                              onCancelEdit={cancelEdit}
+                              onSave={(v) =>
+                                saveInventoryByInventoryItem(
+                                  firstVariant?.inventoryItem?.id,
+                                  v,
+                                )
+                              }
+                              type="number"
+                            />
+                          ) : (
+                            <Text as="p">{String(qty)}</Text>
                           )}
+                        </td>
 
-                          <Button
-                            tone="critical"
-                            size="slim"
-                            onClick={() => deleteProduct(node.id)}
-                          >
-                            Delete
-                          </Button>
-                        </InlineStack>
-                      </td>
-                    </tr>
+                        <td style={{ ...tdStyle, minWidth: 180 }}>
+                          <InlineEditable
+                            value={node.externalWarehouse || ""}
+                            editing={isEditing("product", node.id, "warehouse")}
+                            onStartEdit={() =>
+                              startEdit("product", node.id, "warehouse")
+                            }
+                            onCancelEdit={cancelEdit}
+                            onSave={(v) => saveWarehouse(node.id, v)}
+                            type="text"
+                          />
+                        </td>
 
-                    {hasRealVariants && isOpen && (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}
-                        >
-                          <Text variant="headingSm" as="p">
-                            Variants
-                          </Text>
+                        <td style={{ ...tdStyle, minWidth: 180 }}>
+  <InlineEditable
+  value={tempWarehouse2[node.id] || ""}
+  editing={isEditing("product", node.id, "warehouse2")}
+  onStartEdit={() => startEdit("product", node.id, "warehouse2")}
+  onCancelEdit={cancelEdit}
+  onSave={(v) =>
+    transferFromExternalWarehouse(
+      node.id,
+      firstVariant?.inventoryItem?.id,
+      qty,
+      warehouseQty,
+      v
+    )
+  }
+  type="number"
+/>
+</td>
 
-                          <div
-                            style={{
-                              marginTop: 8,
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: 8,
-                            }}
-                          >
-                            {variants.map((vr) => {
-                              const vrStock = getStockStatus(vr.inventoryQuantity);
-                              return (
-                                <div
-                                  key={vr.id}
-                                  style={{
-                                    background: "#fff",
-                                    border: "1px solid #e1e3e5",
-                                    borderRadius: 8,
-                                    padding: "10px 14px",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 12,
-                                    flexWrap: "wrap",
-                                  }}
-                                >
-                                  <span style={{ flex: 1, minWidth: 200 }}>
-                                    <strong>{vr.title}</strong>
-                                    {vr.sku ? (
-                                      <span style={{ marginLeft: 8, opacity: 0.75 }}>
-                                        SKU: {vr.sku}
-                                      </span>
-                                    ) : null}
-                                  </span>
+                        <td style={{ ...tdStyle, minWidth: 260 }}>
+                          <InlineStack gap="200">
+                            {hasRealVariants && (
+                              <Button
+                                size="slim"
+                                onClick={() => {
+                                  cancelEdit();
+                                  setOpenVariantProductId(
+                                    isOpen ? null : node.id,
+                                  );
+                                }}
+                              >
+                                {isOpen ? "Hide Variants" : "Variants"}
+                              </Button>
+                            )}
 
-                                  <div style={{ minWidth: 100 }}>
-                                    <Badge tone={vrStock.tone}>{vrStock.label}</Badge>
-                                  </div>
-
-                                  <div style={{ minWidth: 140 }}>
-                                    <InlineEditable
-                                      value={vr.price ? `₹${vr.price}` : "—"}
-                                      editing={isEditing("variant", vr.id, "price")}
-                                      onStartEdit={() => startEdit("variant", vr.id, "price")}
-                                      onCancelEdit={cancelEdit}
-                                      onSave={(v) => saveProductPrice(node.id, vr.id, v)}
-                                      type="text"
-                                    />
-                                  </div>
-
-                                  <div style={{ minWidth: 120 }}>
-                                    <InlineEditable
-                                      value={String(vr.inventoryQuantity ?? "")}
-                                      editing={isEditing("variant", vr.id, "inventory")}
-                                      onStartEdit={() =>
-                                        startEdit("variant", vr.id, "inventory")
-                                      }
-                                      onCancelEdit={cancelEdit}
-                                      onSave={(v) =>
-                                        saveInventoryByInventoryItem(vr.inventoryItem?.id, v)
-                                      }
-                                      type="number"
-                                    />
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
+                            <Button
+                              tone="critical"
+                              size="slim"
+                              onClick={() => deleteProduct(node.id)}
+                            >
+                              Delete
+                            </Button>
+                          </InlineStack>
                         </td>
                       </tr>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
 
-        <br />
+                      {hasRealVariants && isOpen && (
+                        <tr>
+                          <td
+                            colSpan={7}
+                            style={{
+                              ...tdStyle,
+                              background: "#f6f6f7",
+                              paddingLeft: 40,
+                            }}
+                          >
+                            <Text variant="headingSm" as="p">
+                              Variants
+                            </Text>
 
-        {/* PAGINATION (Stable) */}
-        {/* PAGINATION (Page Based) */}
-        <InlineStack align="space-between" gap="300">
+                            <div
+                              style={{
+                                marginTop: 8,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 8,
+                              }}
+                            >
+                              {variants.map((vr) => {
+                                const vrStock = getStockStatus(
+                                  vr.inventoryQuantity,
+                                );
+                                return (
+                                  <div
+                                    key={vr.id}
+                                    style={{
+                                      background: "#fff",
+                                      border: "1px solid #e1e3e5",
+                                      borderRadius: 8,
+                                      padding: "10px 14px",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 12,
+                                      flexWrap: "wrap",
+                                    }}
+                                  >
+                                    <span style={{ flex: 1, minWidth: 200 }}>
+                                      <strong>{vr.title}</strong>
+                                      {vr.sku ? (
+                                        <span
+                                          style={{
+                                            marginLeft: 8,
+                                            opacity: 0.75,
+                                          }}
+                                        >
+                                          SKU: {vr.sku}
+                                        </span>
+                                      ) : null}
+                                    </span>
 
-          {/* Previous */}
-          <Button
-            disabled={cursorStack.length === 0}
-            
-            onClick={() => {
-              cancelEdit();
+                                    <div style={{ minWidth: 100 }}>
+                                      <Badge tone={vrStock.tone}>
+                                        {vrStock.label}
+                                      </Badge>
+                                    </div>
 
-              const prev = cursorStack[cursorStack.length - 1];
+                                    <div style={{ minWidth: 140 }}>
+                                      <InlineEditable
+                                        value={vr.price ? `₹${vr.price}` : "—"}
+                                        editing={isEditing(
+                                          "variant",
+                                          vr.id,
+                                          "price",
+                                        )}
+                                        onStartEdit={() =>
+                                          startEdit("variant", vr.id, "price")
+                                        }
+                                        onCancelEdit={cancelEdit}
+                                        onSave={(v) =>
+                                          saveProductPrice(node.id, vr.id, v)
+                                        }
+                                        type="text"
+                                      />
+                                    </div>
 
-              setCursorStack((s) => s.slice(0, -1));
+                                    <div style={{ minWidth: 120 }}>
+                                      <InlineEditable
+                                        value={String(
+                                          vr.inventoryQuantity ?? "",
+                                        )}
+                                        editing={isEditing(
+                                          "variant",
+                                          vr.id,
+                                          "inventory",
+                                        )}
+                                        onStartEdit={() =>
+                                          startEdit(
+                                            "variant",
+                                            vr.id,
+                                            "inventory",
+                                          )
+                                        }
+                                        onCancelEdit={cancelEdit}
+                                        onSave={(v) =>
+                                          saveInventoryByInventoryItem(
+                                            vr.inventoryItem?.id,
+                                            v,
+                                          )
+                                        }
+                                        type="number"
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
 
-              navigate(buildUrl({ q: q || "", after: prev || "" }));
-            }}
-          >
-            Previous
-          </Button>
+          <br />
 
-          <Text as="p" variant="bodySm" tone="subdued">
-            {cursorStack.length + 1}
-          </Text>
+          {/* PAGINATION (Stable) */}
+          {/* PAGINATION (Page Based) */}
+          <InlineStack align="space-between" gap="300">
+            {/* Previous */}
+            <Button
+              disabled={cursorStack.length === 0}
+              onClick={() => {
+                cancelEdit();
 
-          {/* Next */}
-          <Button
-            disabled={!pageInfo?.hasNextPage}
-           
-            variant="primary"
-            onClick={() => {
-              cancelEdit();
+                const prev = cursorStack[cursorStack.length - 1];
 
-              setCursorStack((s) => [...s, after]);
+                setCursorStack((s) => s.slice(0, -1));
 
-              navigate(buildUrl({ q: q || "", after: lastCursor }));
-            }}
-          >
-            Next
-          </Button>
+                navigate(buildUrl({ q: q || "", after: prev || "" }));
+              }}
+            >
+              Previous
+            </Button>
 
-        </InlineStack>
-      </Card>
-    </Page>
+            <Text as="p" variant="bodySm" tone="subdued">
+              {cursorStack.length + 1}
+            </Text>
+
+            {/* Next */}
+            <Button
+              disabled={!pageInfo?.hasNextPage}
+              variant="primary"
+              onClick={() => {
+                cancelEdit();
+
+                setCursorStack((s) => [...s, after]);
+
+                navigate(buildUrl({ q: q || "", after: lastCursor }));
+              }}
+            >
+              Next
+            </Button>
+          </InlineStack>
+        </Card>
+      </Page>
     </>
   );
 }
