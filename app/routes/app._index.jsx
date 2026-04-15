@@ -695,7 +695,7 @@ export default function Index() {
                 <TextField
                   label="Search by Title or SKU"
                   labelHidden
-                  placeholder='Search... (e.g. "Nike" or "sku:ABC123")'
+                  placeholder='Suchen... (z.B. "Nike" oder "sku:ABC123")'
                   value={search}
                   onChange={setSearch}
                   onKeyDown={(e) => {
@@ -713,13 +713,13 @@ export default function Index() {
                   variant="primary"
                   onClick={() => navigate(buildUrl({ q: search.trim() || "" }))}
                 >
-                  Search
+                  Suchen
                 </Button>
                 <Button
                   disabled={!q}
                   onClick={() => navigate(buildUrl({ q: "" }))}
                 >
-                  Clear
+                  Zurücksetzen
                 </Button>
               </InlineStack>
             </InlineStack>
@@ -727,11 +727,11 @@ export default function Index() {
             {/* Info Text */}
             <div style={{ marginTop: 8 }}>
               <Text as="p" variant="bodySm" tone="subdued">
-                Sorted by Title
+                Sortiert nach Titel
                 {q ? (
                   <>
                     {" "}
-                    | Query: <strong>{q}</strong>
+                    | Suchbegriff: <strong>{q}</strong>
                   </>
                 ) : null}
               </Text>
@@ -756,7 +756,7 @@ export default function Index() {
                 onChange={setFilterType}
               />
               <Text as="p" variant="bodySm" tone="subdued" style={{ marginTop: 8 }}>
-                Showing {filteredProducts.length} of {products.length} products
+                Zeige {filteredProducts.length} von {products.length} Produkten
               </Text>
             </div>
           </div>
