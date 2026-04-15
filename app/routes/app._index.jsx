@@ -44,6 +44,24 @@ function buildProductsQuery(raw) {
 
   const val = escapeShopifyQueryValue(q);
   const quoted = q.includes(" ") ? `"${val}"` : val;
+
+  // 🧠 Detect ID search (Shopify GID)
+  if (q.startsWith("gid://")) {
+    return `id:${val}`;
+  }
+
+  // 🧠 Detect numeric ID (optional case)
+  if (/^\d+$/.test(q)) {
+    return `id:${val}`;
+  }
+
+  // 🧠 Detect variant id (if user types like variant:123)
+  if (q.startsWith("variant:")) {
+    const id = q.split(":")[1];
+    return `variant_id:${escapeShopifyQueryValue(id)}`;
+  }
+
+  // 🧠 Default search (Title + SKU)
   return `title:${quoted} OR sku:${quoted}`;
 }
 
@@ -82,12 +100,12 @@ export const loader = async ({ request }) => {
   const res = await admin.graphql(
     `query Products($first: Int!, $after: String, $query: String) {
       products(
-        first: $first
-        after: $after
-        query: $query
-        sortKey: INVENTORY_TOTAL
-        reverse: false
-      ) {
+  first: $first
+  after: $after
+  query: $query
+  sortKey: TITLE
+  reverse: false
+) {
         edges {
           cursor
           node {
@@ -163,6 +181,22 @@ export const action = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
   const form = await request.formData();
   const type = form.get("type");
+
+  if (type === "delete-variant") {
+  const variantId = form.get("variantId");
+
+  await admin.graphql(
+    `mutation productVariantDelete($id: ID!) {
+      productVariantDelete(id: $id) {
+        deletedProductVariantId
+        userErrors { field message }
+      }
+    }`,
+    { variables: { id: variantId } }
+  );
+
+  return json({ success: true });
+}
 
   if (type === "delete") {
     await admin.graphql(
@@ -241,6 +275,71 @@ export const action = async ({ request }) => {
     if (errors?.length) return json({ success: false, errors });
     return json({ success: true });
   }
+
+  if (type === "transfer-inventory") {
+  const productId = form.get("productId");
+  const inventoryItemId = form.get("inventoryItemId");
+  const newShopifyQty = parseInt(form.get("newShopifyQty"), 10);
+  const newExternalQty = parseInt(form.get("newExternalQty"), 10);
+
+  // 1️⃣ Get location
+  const locRes = await admin.graphql(`
+    query getLocation($id: ID!) {
+      inventoryItem(id: $id) {
+        inventoryLevels(first: 1) {
+          edges { node { location { id } } }
+        }
+      }
+    }
+  `, { variables: { id: inventoryItemId } });
+
+  const locData = await locRes.json();
+  const locationId =
+    locData.data?.inventoryItem?.inventoryLevels?.edges[0]?.node?.location?.id;
+
+  if (!locationId) {
+    return json({ success: false, error: "Location not found" });
+  }
+
+  // 2️⃣ Update Shopify inventory
+  const invRes = await admin.graphql(`
+    mutation inventorySet($input: InventorySetQuantitiesInput!) {
+      inventorySetQuantities(input: $input) {
+        userErrors { field message }
+      }
+    }
+  `, {
+    variables: {
+      input: {
+        name: "available",
+        reason: "correction",
+        ignoreCompareQuantity: true,
+        quantities: [
+          { inventoryItemId, locationId, quantity: newShopifyQty },
+        ],
+      },
+    },
+  });
+
+  const invData = await invRes.json();
+  const errors = invData.data?.inventorySetQuantities?.userErrors;
+
+  if (errors?.length) {
+    return json({ success: false, errors });
+  }
+
+  // 3️⃣ Update external warehouse ONLY if Shopify success
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+
+  await db.externalWarehouse.upsert({
+    where: { shop_productId: { shop, productId } },
+   update: { warehouse: String(newExternalQty) },
+create: { shop, productId, warehouse: String(newExternalQty) },
+  });
+
+  return json({ success: true });
+}
 
   /* =======================
    SAVE EXTERNAL WAREHOUSE
@@ -443,6 +542,54 @@ export default function Index() {
 //   }));
 // };
 
+// const transferFromExternalWarehouse = async (
+//   productId,
+//   inventoryItemId,
+//   shopifyQty,
+//   externalQty,
+//   transferQty
+// ) => {
+//   const moveQty = Number(transferQty) || 0;
+//   if (moveQty <= 0) return;
+
+//   if (moveQty > externalQty) {
+//     alert("Not enough stock in External Warehouse");
+//     return;
+//   }
+
+//   const newShopifyQty = shopifyQty + moveQty;
+//   const newExternalQty = externalQty - moveQty;
+
+//   // 1️⃣ Update Shopify inventory FIRST
+//   submit(
+//     {
+//       type: "variant-inventory",
+//       inventoryItemId,
+//       quantity: newShopifyQty,
+//     },
+//     { method: "post" }
+//   );
+
+//   // ⏱️ Wait 500ms, then update external warehouse
+//   setTimeout(() => {
+//     // 2️⃣ Update DB external warehouse
+//     submit(
+//       {
+//         type: "external-warehouse",
+//         productId,
+//         warehouse: newExternalQty,
+//       },
+//       { method: "post" }
+//     );
+
+//     // 3️⃣ Reset NEW warehouse field to 0
+//     setTempWarehouse2((prev) => ({
+//       ...prev,
+//       [productId]: "",
+//     }));
+//   }, 500);
+// };
+
 const transferFromExternalWarehouse = async (
   productId,
   inventoryItemId,
@@ -451,6 +598,7 @@ const transferFromExternalWarehouse = async (
   transferQty
 ) => {
   const moveQty = Number(transferQty) || 0;
+
   if (moveQty <= 0) return;
 
   if (moveQty > externalQty) {
@@ -461,34 +609,23 @@ const transferFromExternalWarehouse = async (
   const newShopifyQty = shopifyQty + moveQty;
   const newExternalQty = externalQty - moveQty;
 
-  // 1️⃣ Update Shopify inventory FIRST
+  // ✅ SINGLE REQUEST (no race condition)
   submit(
     {
-      type: "variant-inventory",
+      type: "transfer-inventory",
+      productId,
       inventoryItemId,
-      quantity: newShopifyQty,
+      newShopifyQty,
+      newExternalQty,
     },
     { method: "post" }
   );
 
-  // ⏱️ Wait 500ms, then update external warehouse
-  setTimeout(() => {
-    // 2️⃣ Update DB external warehouse
-    submit(
-      {
-        type: "external-warehouse",
-        productId,
-        warehouse: newExternalQty,
-      },
-      { method: "post" }
-    );
-
-    // 3️⃣ Reset NEW warehouse field to 0
-    setTempWarehouse2((prev) => ({
-      ...prev,
-      [productId]: "",
-    }));
-  }, 500);
+  // ✅ Reset input immediately (UI clean)
+  setTempWarehouse2((prev) => ({
+    ...prev,
+    [productId]: "",
+  }));
 };
 
   const deleteProduct = (productId) =>
@@ -500,16 +637,17 @@ const transferFromExternalWarehouse = async (
 
     // ✅ If search exists, filter variants by SKU match
     if (q && !q.includes(":")) {
-      const searchLower = q.toLowerCase();
+  const searchLower = q.toLowerCase();
 
-      const filtered = variants.filter((v) =>
-        v.sku?.toLowerCase().includes(searchLower),
-      );
+  const filtered = variants.filter((v) =>
+    v.sku?.toLowerCase().includes(searchLower) ||
+    v.id?.toLowerCase().includes(searchLower)
+  );
 
-      if (filtered.length > 0) {
-        variants = filtered;
-      }
-    }
+  if (filtered.length > 0) {
+    variants = filtered;
+  }
+}
 
     const firstVariant = variants[0];
 
@@ -595,7 +733,7 @@ const transferFromExternalWarehouse = async (
 
             <div style={{ marginTop: 8 }}>
               <Text as="p" variant="bodySm" tone="subdued">
-                Sorted: Low → Medium → Healthy (by total inventory)
+                Sorted by Title
                 {q ? (
                   <>
                     {" "}
@@ -635,10 +773,20 @@ const transferFromExternalWarehouse = async (
                     <Fragment key={node.id}>
                       <tr>
                         <td style={{ ...tdStyle, minWidth: 220 }}>
-                          <Text as="p" variant="bodyMd">
-                            {node.title}
-                          </Text>
-                        </td>
+  <div>
+    {/* Product Title */}
+    <Text as="p" variant="bodyMd">
+      {node.title}
+    </Text>
+
+    {/* SKU below title */}
+    {firstVariant?.sku ? (
+      <Text as="p" variant="bodySm" tone="subdued">
+        SKU: {firstVariant.sku}
+      </Text>
+    ) : null}
+  </div>
+</td>
 
                         <td style={{ ...tdStyle, minWidth: 120 }}>
                           <InlineEditable
@@ -685,36 +833,50 @@ const transferFromExternalWarehouse = async (
                           )}
                         </td>
 
-                        <td style={{ ...tdStyle, minWidth: 180 }}>
-                          <InlineEditable
-                            value={node.externalWarehouse || ""}
-                            editing={isEditing("product", node.id, "warehouse")}
-                            onStartEdit={() =>
-                              startEdit("product", node.id, "warehouse")
-                            }
-                            onCancelEdit={cancelEdit}
-                            onSave={(v) => saveWarehouse(node.id, v)}
-                            type="text"
-                          />
-                        </td>
+                       <td style={{ ...tdStyle, minWidth: 180 }}>
+  {!hasRealVariants ? (
+    <InlineEditable
+      value={node.externalWarehouse || ""}
+      editing={isEditing("product", node.id, "warehouse")}
+      onStartEdit={() =>
+        startEdit("product", node.id, "warehouse")
+      }
+      onCancelEdit={cancelEdit}
+      onSave={(v) => saveWarehouse(node.id, v)}
+      type="text"
+    />
+  ) : (
+    <Text as="p" tone="subdued">
+      —
+    </Text>
+  )}
+</td>
 
                         <td style={{ ...tdStyle, minWidth: 180 }}>
-  <InlineEditable
-  value={tempWarehouse2[node.id] || ""}
-  editing={isEditing("product", node.id, "warehouse2")}
-  onStartEdit={() => startEdit("product", node.id, "warehouse2")}
-  onCancelEdit={cancelEdit}
-  onSave={(v) =>
-    transferFromExternalWarehouse(
-      node.id,
-      firstVariant?.inventoryItem?.id,
-      qty,
-      warehouseQty,
-      v
-    )
-  }
-  type="number"
-/>
+ <td style={{ ...tdStyle, minWidth: 180 }}>
+  {!hasRealVariants ? (
+    <InlineEditable
+      value={tempWarehouse2[node.id] || ""}
+      editing={isEditing("product", node.id, "warehouse2")}
+      onStartEdit={() => startEdit("product", node.id, "warehouse2")}
+      onCancelEdit={cancelEdit}
+      onSave={(v) =>
+        transferFromExternalWarehouse(
+          node.id,
+          firstVariant?.inventoryItem?.id,
+          qty,
+          warehouseQty,
+          v
+        )
+      }
+      type="number"
+    />
+  ) : (
+    <Text as="p" tone="subdued">
+      —
+    </Text>
+  )}
+</td>
 </td>
 
                         <td style={{ ...tdStyle, minWidth: 260 }}>
@@ -758,102 +920,91 @@ const transferFromExternalWarehouse = async (
                               Variants
                             </Text>
 
-                            <div
-                              style={{
-                                marginTop: 8,
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 8,
-                              }}
-                            >
-                              {variants.map((vr) => {
-                                const vrStock = getStockStatus(
-                                  vr.inventoryQuantity,
-                                );
-                                return (
-                                  <div
-                                    key={vr.id}
-                                    style={{
-                                      background: "#fff",
-                                      border: "1px solid #e1e3e5",
-                                      borderRadius: 8,
-                                      padding: "10px 14px",
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: 12,
-                                      flexWrap: "wrap",
-                                    }}
-                                  >
-                                    <span style={{ flex: 1, minWidth: 200 }}>
-                                      <strong>{vr.title}</strong>
-                                      {vr.sku ? (
-                                        <span
-                                          style={{
-                                            marginLeft: 8,
-                                            opacity: 0.75,
-                                          }}
-                                        >
-                                          SKU: {vr.sku}
-                                        </span>
-                                      ) : null}
-                                    </span>
+                            <div style={{ marginTop: 10 }}>
+  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    
+    {/* Header */}
+    <thead>
+      <tr style={{ background: "#f6f6f7" }}>
+        <th style={{ padding: 8, textAlign: "left" }}>Title</th>
+        <th style={{ padding: 8, textAlign: "left" }}>Price</th>
+        <th style={{ padding: 8, textAlign: "left" }}>Inventory</th>
+        <th style={{ padding: 8, textAlign: "left" }}>Action</th>
+      </tr>
+    </thead>
 
-                                    <div style={{ minWidth: 100 }}>
-                                      <Badge tone={vrStock.tone}>
-                                        {vrStock.label}
-                                      </Badge>
-                                    </div>
+    {/* Body */}
+    <tbody>
+      {variants.map((vr) => (
+        <tr key={vr.id} style={{ borderTop: "1px solid #e1e3e5" }}>
+          
+          {/* Title */}
+          <td style={{ padding: 8, width: 255 }}>
+            <strong>{vr.title}</strong>
+            {vr.sku ? (
+              <div style={{ fontSize: 12, opacity: 0.7 }}>
+                SKU: {vr.sku}
+              </div>
+            ) : null}
+          </td>
 
-                                    <div style={{ minWidth: 140 }}>
-                                      <InlineEditable
-                                        value={vr.price ? `₹${vr.price}` : "—"}
-                                        editing={isEditing(
-                                          "variant",
-                                          vr.id,
-                                          "price",
-                                        )}
-                                        onStartEdit={() =>
-                                          startEdit("variant", vr.id, "price")
-                                        }
-                                        onCancelEdit={cancelEdit}
-                                        onSave={(v) =>
-                                          saveProductPrice(node.id, vr.id, v)
-                                        }
-                                        type="text"
-                                      />
-                                    </div>
+          {/* Price */}
+          <td style={{ padding: 8 }}>
+            <InlineEditable
+  value={vr.price ? `₹${vr.price}` : "—"}
+  editing={isEditing("variant", vr.id, "price")}
+  onStartEdit={() =>
+    startEdit("variant", vr.id, "price")
+  }
+  onCancelEdit={cancelEdit}
+  onSave={(v) =>
+    saveProductPrice(node.id, vr.id, v)
+  }
+  type="text"
+/>
+          </td>
 
-                                    <div style={{ minWidth: 120 }}>
-                                      <InlineEditable
-                                        value={String(
-                                          vr.inventoryQuantity ?? "",
-                                        )}
-                                        editing={isEditing(
-                                          "variant",
-                                          vr.id,
-                                          "inventory",
-                                        )}
-                                        onStartEdit={() =>
-                                          startEdit(
-                                            "variant",
-                                            vr.id,
-                                            "inventory",
-                                          )
-                                        }
-                                        onCancelEdit={cancelEdit}
-                                        onSave={(v) =>
-                                          saveInventoryByInventoryItem(
-                                            vr.inventoryItem?.id,
-                                            v,
-                                          )
-                                        }
-                                        type="number"
-                                      />
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
+          {/* Inventory */}
+        <td style={{ padding: 8 }}>
+  <InlineEditable
+    value={String(vr.inventoryQuantity ?? "")}
+    editing={isEditing("variant", vr.id, "inventory")}
+    onStartEdit={() =>
+      startEdit("variant", vr.id, "inventory")
+    }
+    onCancelEdit={cancelEdit}
+    onSave={(v) =>
+      saveInventoryByInventoryItem(
+        vr.inventoryItem?.id,
+        v
+      )
+    }
+    type="number"
+  />
+</td>
+
+          {/* Action */}
+          <td style={{ padding: 8 }}>
+            <Button
+              tone="critical"
+              size="slim"
+              onClick={() =>
+                submit(
+                  { type: "delete-variant", variantId: vr.id },
+                  { method: "post" }
+                )
+
+              }
+            >
+              Delete
+            </Button>
+          </td>
+
+        </tr>
+      ))}
+    </tbody>
+  </table>
+</div>
                           </td>
                         </tr>
                       )}
