@@ -15,6 +15,7 @@ import {
   Text,
   TextField,
   Spinner,
+  Select,
 } from "@shopify/polaris";
 
 /* =======================
@@ -45,27 +46,23 @@ function buildProductsQuery(raw) {
   const val = escapeShopifyQueryValue(q);
   const quoted = q.includes(" ") ? `"${val}"` : val;
 
-  // 🧠 Detect ID search (Shopify GID)
   if (q.startsWith("gid://")) {
     return `id:${val}`;
   }
 
-  // 🧠 Detect numeric ID (optional case)
   if (/^\d+$/.test(q)) {
     return `id:${val}`;
   }
 
-  // 🧠 Detect variant id (if user types like variant:123)
   if (q.startsWith("variant:")) {
     const id = q.split(":")[1];
     return `variant_id:${escapeShopifyQueryValue(id)}`;
   }
 
-  // 🧠 Default search (Title + SKU)
   return `title:${quoted} OR sku:${quoted}`;
 }
 
-// Stock status
+// ✅ Stock status - triggers at <= 5 for "low"
 const getStockStatus = (qty) => {
   const count = Number(qty) || 0;
   if (count <= 5) return { label: "Low", tone: "critical" };
@@ -74,10 +71,22 @@ const getStockStatus = (qty) => {
 };
 
 /* =======================
-   LOADER (Stable global sort + stable pagination)
-   ✅ only forward cursor pagination (first/after)
-   ✅ sortKey INVENTORY_TOTAL (low stock top)
+   FILTER LOGIC
 ======================= */
+// Filter 1: Hauptlager <= Außenlager (main inventory <= external inventory)
+const filterLowMainInventory = (node, warehouseQty) => {
+  const mainQty = Number(node.totalInventory) || 0;
+  return mainQty <= warehouseQty;
+};
+
+// Filter 2: Hauptlager minus Melde <= Aussenlager
+// (main inventory - reorder level <= external inventory)
+const filterLowAfterReorder = (node, warehouseQty) => {
+  const mainQty = Number(node.totalInventory) || 0;
+  const reorderLevel = Number(node.reorderLevel) || 0;
+  return mainQty - reorderLevel <= warehouseQty;
+};
+
 function toPositiveInt(v, fallback = 1) {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
@@ -111,6 +120,7 @@ export const loader = async ({ request }) => {
           node {
             id
             title
+            vendor
             status
             totalInventory
             variants(first: 50) {
@@ -143,27 +153,28 @@ export const loader = async ({ request }) => {
   );
 
   const data = await res.json();
-  // 🟢 Collect product IDs from Shopify response
   const productIds = data.data.products.edges.map((e) => e.node.id);
 
-  // 🟢 Fetch warehouses from your DB
   const warehouses = await db.externalWarehouse.findMany({
     where: {
       productId: { in: productIds },
     },
   });
 
-  // 🟢 Convert to lookup map
   const warehouseMap = Object.fromEntries(
     warehouses.map((w) => [w.productId, w.warehouse]),
   );
 
-  // 🟢 Attach warehouse to each product
+  const reorderMap = Object.fromEntries(
+    warehouses.map((w) => [w.productId, w.reorder]),
+  );
+
   const productsWithWarehouse = data.data.products.edges.map((edge) => ({
     ...edge,
     node: {
       ...edge.node,
       externalWarehouse: warehouseMap[edge.node.id] || "",
+      reorderLevel: reorderMap[edge.node.id] || "",
     },
   }));
 
@@ -174,6 +185,7 @@ export const loader = async ({ request }) => {
     after,
   });
 };
+
 /* =======================
    ACTION
 ======================= */
@@ -182,21 +194,42 @@ export const action = async ({ request }) => {
   const form = await request.formData();
   const type = form.get("type");
 
-  if (type === "delete-variant") {
-  const variantId = form.get("variantId");
+  if (type === "reorder-level") {
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
 
-  await admin.graphql(
-    `mutation productVariantDelete($id: ID!) {
-      productVariantDelete(id: $id) {
-        deletedProductVariantId
-        userErrors { field message }
-      }
-    }`,
-    { variables: { id: variantId } }
-  );
+  const productId = form.get("productId");
+  const reorder = form.get("reorder");
+
+  await db.externalWarehouse.upsert({
+    where: { shop_productId: { shop, productId } },
+    update: { reorder: String(reorder || "0") },   // ⭐ FIX
+    create: {
+      shop,
+      productId,
+      reorder: String(reorder || "0"),             // ⭐ FIX
+      warehouse: "0",
+    },
+  });
 
   return json({ success: true });
 }
+
+  if (type === "delete-variant") {
+    const variantId = form.get("variantId");
+
+    await admin.graphql(
+      `mutation productVariantDelete($id: ID!) {
+      productVariantDelete(id: $id) {
+        deletedProductVariantIdss
+        userErrors { field message }
+      }
+    }`,
+      { variables: { id: variantId } },
+    );
+
+    return json({ success: true });
+  }
 
   if (type === "delete") {
     await admin.graphql(
@@ -276,14 +309,14 @@ export const action = async ({ request }) => {
     return json({ success: true });
   }
 
-  if (type === "transfer-inventory") {
-  const productId = form.get("productId");
-  const inventoryItemId = form.get("inventoryItemId");
-  const newShopifyQty = parseInt(form.get("newShopifyQty"), 10);
-  const newExternalQty = parseInt(form.get("newExternalQty"), 10);
+  if (type === "sync-all-inventory") {
+    const productId = form.get("productId");
+    const inventoryItemId = form.get("inventoryItemId");
+    const newShopifyQty = parseInt(form.get("newShopifyQty"), 10);
+    const newExternalQty = parseInt(form.get("newExternalQty"), 10);
 
-  // 1️⃣ Get location
-  const locRes = await admin.graphql(`
+    const locRes = await admin.graphql(
+      `
     query getLocation($id: ID!) {
       inventoryItem(id: $id) {
         inventoryLevels(first: 1) {
@@ -291,59 +324,60 @@ export const action = async ({ request }) => {
         }
       }
     }
-  `, { variables: { id: inventoryItemId } });
+  `,
+      { variables: { id: inventoryItemId } },
+    );
 
-  const locData = await locRes.json();
-  const locationId =
-    locData.data?.inventoryItem?.inventoryLevels?.edges[0]?.node?.location?.id;
+    const locData = await locRes.json();
+    const locationId =
+      locData.data?.inventoryItem?.inventoryLevels?.edges[0]?.node?.location
+        ?.id;
 
-  if (!locationId) {
-    return json({ success: false, error: "Location not found" });
-  }
+    if (!locationId) {
+      return json({ success: false, error: "Location not found" });
+    }
 
-  // 2️⃣ Update Shopify inventory
-  const invRes = await admin.graphql(`
+    const invRes = await admin.graphql(
+      `
     mutation inventorySet($input: InventorySetQuantitiesInput!) {
       inventorySetQuantities(input: $input) {
         userErrors { field message }
       }
     }
-  `, {
-    variables: {
-      input: {
-        name: "available",
-        reason: "correction",
-        ignoreCompareQuantity: true,
-        quantities: [
-          { inventoryItemId, locationId, quantity: newShopifyQty },
-        ],
+  `,
+      {
+        variables: {
+          input: {
+            name: "available",
+            reason: "correction",
+            ignoreCompareQuantity: true,
+            quantities: [
+              { inventoryItemId, locationId, quantity: newShopifyQty },
+            ],
+          },
+        },
       },
-    },
-  });
+    );
 
-  const invData = await invRes.json();
-  const errors = invData.data?.inventorySetQuantities?.userErrors;
+    const invData = await invRes.json();
+    const errors = invData.data?.inventorySetQuantities?.userErrors;
 
-  if (errors?.length) {
-    return json({ success: false, errors });
+    if (errors?.length) {
+      return json({ success: false, errors });
+    }
+
+    const { session } = await authenticate.admin(request);
+    const shop = session.shop;
+
+    await db.externalWarehouse.upsert({
+      where: { shop_productId: { shop, productId } },
+      update: { warehouse: String(newExternalQty) },
+      create: { shop, productId, warehouse: String(newExternalQty) },
+    });
+
+    return json({ success: true });
   }
 
-  // 3️⃣ Update external warehouse ONLY if Shopify success
-  const { session } = await authenticate.admin(request);
-  const shop = session.shop;
-
-  await db.externalWarehouse.upsert({
-    where: { shop_productId: { shop, productId } },
-   update: { warehouse: String(newExternalQty) },
-create: { shop, productId, warehouse: String(newExternalQty) },
-  });
-
-  return json({ success: true });
-}
-
-  /* =======================
-   SAVE EXTERNAL WAREHOUSE
-======================= */
   if (type === "external-warehouse") {
     const { session } = await authenticate.admin(request);
     const shop = session.shop;
@@ -461,11 +495,9 @@ function InlineEditable({
 }
 
 /* =======================
-   MAIN COMPONENT (Clean + Stable)
+   MAIN COMPONENT (With Filters)
 ======================= */
 export default function Index() {
-  // const { products, pageInfo, q } = useLoaderData();
-
   const { products, pageInfo, q, after } = useLoaderData();
   const navigate = useNavigate();
   const submit = useSubmit();
@@ -478,28 +510,26 @@ export default function Index() {
     return products?.length ? products[products.length - 1].cursor : null;
   }, [products]);
 
-  // ✅ cursor history for Previous button (stable)
   const [cursorStack, setCursorStack] = useState([]);
-
   const [openVariantProductId, setOpenVariantProductId] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
   const [tempWarehouse2, setTempWarehouse2] = useState({});
+
+  // ✅ FILTER STATE
+  const [filterType, setFilterType] = useState("none");
 
   // Search UI
   const [search, setSearch] = useState(q || "");
   useEffect(() => setSearch(q || ""), [q]);
 
-  // ✅ whenever query changes (new search / clear) reset pagination history
   useEffect(() => {
     setCursorStack([]);
   }, [q]);
 
   const buildUrl = ({ q, after }) => {
     const sp = new URLSearchParams();
-
     if (q) sp.set("q", q);
     if (after) sp.set("after", after);
-
     return `?${sp.toString()}`;
   };
 
@@ -535,119 +565,62 @@ export default function Index() {
     );
   };
 
-//   const saveWarehouse2Local = (productId, value) => {
-//   setTempWarehouse2((prev) => ({
-//     ...prev,
-//     [productId]: value,
-//   }));
-// };
+  const saveReorderLevel = (productId, reorder) => {
+    submit({ type: "reorder-level", productId, reorder }, { method: "post" });
+  };
 
-// const transferFromExternalWarehouse = async (
-//   productId,
-//   inventoryItemId,
-//   shopifyQty,
-//   externalQty,
-//   transferQty
-// ) => {
-//   const moveQty = Number(transferQty) || 0;
-//   if (moveQty <= 0) return;
+  const transferFromExternalWarehouse = async (
+    productId,
+    inventoryItemId,
+    shopifyQty,
+    externalQty,
+    inputQty,
+  ) => {
+    const newQty = Number(inputQty) || 0;
 
-//   if (moveQty > externalQty) {
-//     alert("Not enough stock in External Warehouse");
-//     return;
-//   }
+    if (externalQty <= 0 && newQty <= 0) return;
 
-//   const newShopifyQty = shopifyQty + moveQty;
-//   const newExternalQty = externalQty - moveQty;
+    const qtyToMove = externalQty + newQty;
 
-//   // 1️⃣ Update Shopify inventory FIRST
-//   submit(
-//     {
-//       type: "variant-inventory",
-//       inventoryItemId,
-//       quantity: newShopifyQty,
-//     },
-//     { method: "post" }
-//   );
+    const newShopifyQty = shopifyQty + qtyToMove;
+    const newExternalQty = 0;
 
-//   // ⏱️ Wait 500ms, then update external warehouse
-//   setTimeout(() => {
-//     // 2️⃣ Update DB external warehouse
-//     submit(
-//       {
-//         type: "external-warehouse",
-//         productId,
-//         warehouse: newExternalQty,
-//       },
-//       { method: "post" }
-//     );
+    submit(
+      {
+        type: "sync-all-inventory",
+        productId,
+        inventoryItemId,
+        newShopifyQty,
+        newExternalQty,
+      },
+      { method: "post" },
+    );
 
-//     // 3️⃣ Reset NEW warehouse field to 0
-//     setTempWarehouse2((prev) => ({
-//       ...prev,
-//       [productId]: "",
-//     }));
-//   }, 500);
-// };
-
-const transferFromExternalWarehouse = async (
-  productId,
-  inventoryItemId,
-  shopifyQty,
-  externalQty,
-  transferQty
-) => {
-  const moveQty = Number(transferQty) || 0;
-
-  if (moveQty <= 0) return;
-
-  if (moveQty > externalQty) {
-    alert("Not enough stock in External Warehouse");
-    return;
-  }
-
-  const newShopifyQty = shopifyQty + moveQty;
-  const newExternalQty = externalQty - moveQty;
-
-  // ✅ SINGLE REQUEST (no race condition)
-  submit(
-    {
-      type: "transfer-inventory",
-      productId,
-      inventoryItemId,
-      newShopifyQty,
-      newExternalQty,
-    },
-    { method: "post" }
-  );
-
-  // ✅ Reset input immediately (UI clean)
-  setTempWarehouse2((prev) => ({
-    ...prev,
-    [productId]: "",
-  }));
-};
+    setTempWarehouse2((prev) => ({
+      ...prev,
+      [productId]: "",
+    }));
+  };
 
   const deleteProduct = (productId) =>
     submit({ type: "delete", productId }, { method: "post" });
 
-  // ✅ unified qty source (badge + inventory same)
   const getRowInfo = (node) => {
     let variants = node.variants.edges.map((e) => e.node);
 
-    // ✅ If search exists, filter variants by SKU match
     if (q && !q.includes(":")) {
-  const searchLower = q.toLowerCase();
+      const searchLower = q.toLowerCase();
 
-  const filtered = variants.filter((v) =>
-    v.sku?.toLowerCase().includes(searchLower) ||
-    v.id?.toLowerCase().includes(searchLower)
-  );
+      const filtered = variants.filter(
+        (v) =>
+          v.sku?.toLowerCase().includes(searchLower) ||
+          v.id?.toLowerCase().includes(searchLower),
+      );
 
-  if (filtered.length > 0) {
-    variants = filtered;
-  }
-}
+      if (filtered.length > 0) {
+        variants = filtered;
+      }
+    }
 
     const firstVariant = variants[0];
 
@@ -660,6 +633,25 @@ const transferFromExternalWarehouse = async (
 
     return { variants, firstVariant, hasRealVariants, qty };
   };
+
+  // ✅ APPLY FILTERS
+  const filteredProducts = useMemo(() => {
+    return products.filter(({ node }) => {
+      const warehouseQty = Number(node.externalWarehouse) || 0;
+
+      if (filterType === "none") {
+        return true;
+      } else if (filterType === "lowMain") {
+        // Hauptlager <= Außenlager
+        return filterLowMainInventory(node, warehouseQty);
+      } else if (filterType === "lowAfterReorder") {
+        // Hauptlager minus Melde <= Aussenlager
+        return filterLowAfterReorder(node, warehouseQty);
+      }
+      return true;
+    });
+  }, [products, filterType]);
+
   return (
     <>
       {isPageLoading && (
@@ -695,8 +687,9 @@ const transferFromExternalWarehouse = async (
       )}
       <Page title="Inventory Manager">
         <Card>
-          {/* SEARCH */}
+          {/* SEARCH & FILTER SECTION */}
           <div style={{ padding: 16, borderBottom: "1px solid #e1e3e5" }}>
+            {/* Search Bar */}
             <InlineStack gap="300" align="space-between">
               <div style={{ flex: 1, minWidth: 280 }}>
                 <TextField
@@ -731,6 +724,7 @@ const transferFromExternalWarehouse = async (
               </InlineStack>
             </InlineStack>
 
+            {/* Info Text */}
             <div style={{ marginTop: 8 }}>
               <Text as="p" variant="bodySm" tone="subdued">
                 Sorted by Title
@@ -742,285 +736,375 @@ const transferFromExternalWarehouse = async (
                 ) : null}
               </Text>
             </div>
+
+            {/* ✅ FILTER DROPDOWN */}
+            <div style={{ marginTop: 16, maxWidth: 400 }}>
+              <Select
+                label="⚠️ Alert Filter"
+                options={[
+                  { label: "No Filter", value: "none" },
+                  {
+                    label: "🔴 Nur Hauptlager <= Außenlager",
+                    value: "lowMain",
+                  },
+                  {
+                    label: "🟠 Hauptlager minus Melde <= Aussenlager",
+                    value: "lowAfterReorder",
+                  },
+                ]}
+                value={filterType}
+                onChange={setFilterType}
+              />
+              <Text as="p" variant="bodySm" tone="subdued" style={{ marginTop: 8 }}>
+                Showing {filteredProducts.length} of {products.length} products
+              </Text>
+            </div>
           </div>
 
+          {/* TABLE */}
           <div style={{ overflowX: "auto" }}>
             <table style={tableStyle}>
               <thead>
                 <tr>
-                  <th style={thStyle}>Title</th>
-                  
-                  <th style={thStyle}>Price</th>
-                  <th style={thStyle}>Inventory</th>
-                  <th style={thStyle}>external warehouse</th>
-                  <th style={thStyle}>external Warehouse new</th>
-                  <th style={thStyle}>Actions</th>
+                  <th style={thStyle}>Artikel</th>
+                  <th style={thStyle}>Hersteller</th>
+                  <th style={thStyle}>Hauptlager</th>
+                  <th style={thStyle}>Status</th>
+                  <th style={thStyle}>Außenlager</th>
+                  <th style={thStyle}>Aussenlager Neu</th>
+                  <th style={thStyle}>Meldebestand (in VKE)</th>
+                  <th style={thStyle}>Aktion</th>
                 </tr>
               </thead>
 
               <tbody>
-                {products.map(({ node, cursor }) => {
-                  const { variants, firstVariant, hasRealVariants, qty } =
-                    getRowInfo(node);
-                  const isOpen = openVariantProductId === node.id;
-                  const warehouseQty = Number(node.externalWarehouse) || 0;
-                  const remainingQty = qty - warehouseQty;
+                {filteredProducts.length === 0 ? (
+                  <tr>
+                    <td colSpan="8" style={{ ...tdStyle, textAlign: "center" }}>
+                      <Text tone="subdued">No products match this filter</Text>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredProducts.map(({ node, cursor }) => {
+                    const { variants, firstVariant, hasRealVariants, qty } =
+                      getRowInfo(node);
+                    const isOpen = openVariantProductId === node.id;
+                    const warehouseQty = Number(node.externalWarehouse) || 0;
+                    const reorderLevel = Number(node.reorderLevel) || 0;
+                    const canEditRowInventory = !hasRealVariants;
 
-                  // ✅ Only allow “row inventory edit” for single-variant products
-                  const canEditRowInventory = !hasRealVariants;
+                    // ✅ Stock status badge
+                    const stockStatus = getStockStatus(qty);
+                    const afterReorderQty = qty - reorderLevel;
 
-                  return (
-                    <Fragment key={node.id}>
-                      <tr>
-                        <td style={{ ...tdStyle, minWidth: 220 }}>
-  <div>
-    {/* Product Title */}
-    <Text as="p" variant="bodyMd">
-      {node.title}
-    </Text>
+                    return (
+                      <Fragment key={node.id}>
+                        <tr style={{
+                          background: 
+                            stockStatus.label === "Low" ? "rgba(255, 0, 0, 0.05)" : "transparent"
+                        }}>
+                          <td style={{ ...tdStyle, minWidth: 220 }}>
+                            <div>
+                              <Text as="p" variant="bodyMd">
+                                {node.title}
+                              </Text>
+                              {firstVariant?.sku ? (
+                                <Text as="p" variant="bodySm" tone="subdued">
+                                  SKU: {firstVariant.sku}
+                                </Text>
+                              ) : null}
+                            </div>
+                          </td>
 
-    {/* SKU below title */}
-    {firstVariant?.sku ? (
-      <Text as="p" variant="bodySm" tone="subdued">
-        SKU: {firstVariant.sku}
-      </Text>
-    ) : null}
-  </div>
-</td>
+                          <td style={{ ...tdStyle, minWidth: 120 }}>
+                            <Text as="p">{node.vendor || "—"}</Text>
+                          </td>
 
-                        <td style={{ ...tdStyle, minWidth: 120 }}>
-                          <InlineEditable
-                            value={
-                              firstVariant?.price
-                                ? `₹${firstVariant.price}`
-                                : "—"
-                            }
-                            editing={isEditing("product", node.id, "price")}
-                            onStartEdit={() =>
-                              startEdit("product", node.id, "price")
-                            }
-                            onCancelEdit={cancelEdit}
-                            onSave={(v) =>
-                              saveProductPrice(node.id, firstVariant?.id, v)
-                            }
-                            type="text"
-                          />
-                        </td>
-
-                        <td style={{ ...tdStyle, minWidth: 110 }}>
-                          {canEditRowInventory ? (
-                            <InlineEditable
-                              value={String(qty)}
-                              editing={isEditing(
-                                "product",
-                                node.id,
-                                "inventory",
-                              )}
-                              onStartEdit={() =>
-                                startEdit("product", node.id, "inventory")
-                              }
-                              onCancelEdit={cancelEdit}
-                              onSave={(v) =>
-                                saveInventoryByInventoryItem(
-                                  firstVariant?.inventoryItem?.id,
-                                  v,
-                                )
-                              }
-                              type="number"
-                            />
-                          ) : (
-                            <Text as="p">{String(qty)}</Text>
-                          )}
-                        </td>
-
-                       <td style={{ ...tdStyle, minWidth: 180 }}>
-  {!hasRealVariants ? (
-    <InlineEditable
-      value={node.externalWarehouse || ""}
-      editing={isEditing("product", node.id, "warehouse")}
-      onStartEdit={() =>
-        startEdit("product", node.id, "warehouse")
-      }
-      onCancelEdit={cancelEdit}
-      onSave={(v) => saveWarehouse(node.id, v)}
-      type="text"
-    />
-  ) : (
-    <Text as="p" tone="subdued">
-      —
-    </Text>
-  )}
-</td>
-
-                        <td style={{ ...tdStyle, minWidth: 180 }}>
- <td style={{ ...tdStyle, minWidth: 180 }}>
-  {!hasRealVariants ? (
-    <InlineEditable
-      value={tempWarehouse2[node.id] || ""}
-      editing={isEditing("product", node.id, "warehouse2")}
-      onStartEdit={() => startEdit("product", node.id, "warehouse2")}
-      onCancelEdit={cancelEdit}
-      onSave={(v) =>
-        transferFromExternalWarehouse(
-          node.id,
-          firstVariant?.inventoryItem?.id,
-          qty,
-          warehouseQty,
-          v
-        )
-      }
-      type="number"
-    />
-  ) : (
-    <Text as="p" tone="subdued">
-      —
-    </Text>
-  )}
-</td>
-</td>
-
-                        <td style={{ ...tdStyle, minWidth: 260 }}>
-                          <InlineStack gap="200">
-                            {hasRealVariants && (
-                              <Button
-                                size="slim"
-                                onClick={() => {
-                                  cancelEdit();
-                                  setOpenVariantProductId(
-                                    isOpen ? null : node.id,
-                                  );
-                                }}
-                              >
-                                {isOpen ? "Hide Variants" : "Variants"}
-                              </Button>
+                          <td style={{ ...tdStyle, minWidth: 110 }}>
+                            {canEditRowInventory ? (
+                              <InlineEditable
+                                value={String(qty)}
+                                editing={isEditing(
+                                  "product",
+                                  node.id,
+                                  "inventory",
+                                )}
+                                onStartEdit={() =>
+                                  startEdit("product", node.id, "inventory")
+                                }
+                                onCancelEdit={cancelEdit}
+                                onSave={(v) =>
+                                  saveInventoryByInventoryItem(
+                                    firstVariant?.inventoryItem?.id,
+                                    v,
+                                  )
+                                }
+                                type="number"
+                              />
+                            ) : (
+                              <Text as="p">{String(qty)}</Text>
                             )}
+                          </td>
 
-                            <Button
-                              tone="critical"
-                              size="slim"
-                              onClick={() => deleteProduct(node.id)}
-                            >
-                              Delete
-                            </Button>
-                          </InlineStack>
-                        </td>
-                      </tr>
+                          {/* ✅ STATUS BADGE */}
+                          <td style={{ ...tdStyle, minWidth: 100 }}>
+                            <Badge tone={stockStatus.tone}>
+                              {stockStatus.label}
+                            </Badge>
+                          </td>
 
-                      {hasRealVariants && isOpen && (
-                        <tr>
-                          <td
-                            colSpan={7}
-                            style={{
-                              ...tdStyle,
-                              background: "#f6f6f7",
-                              paddingLeft: 40,
-                            }}
-                          >
-                            <Text variant="headingSm" as="p">
-                              Variants
-                            </Text>
+                          <td style={{ ...tdStyle, minWidth: 120 }}>
+                            {!hasRealVariants ? (
+                              <InlineEditable
+                                value={node.externalWarehouse || ""}
+                                editing={isEditing(
+                                  "product",
+                                  node.id,
+                                  "warehouse",
+                                )}
+                                onStartEdit={() =>
+                                  startEdit("product", node.id, "warehouse")
+                                }
+                                onCancelEdit={cancelEdit}
+                                onSave={(v) => saveWarehouse(node.id, v)}
+                                type="text"
+                              />
+                            ) : (
+                              <Text as="p" tone="subdued">
+                                —
+                              </Text>
+                            )}
+                          </td>
 
-                            <div style={{ marginTop: 10 }}>
-  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-    
-    {/* Header */}
-    <thead>
-      <tr style={{ background: "#f6f6f7" }}>
-        <th style={{ padding: 8, textAlign: "left" }}>Title</th>
-        <th style={{ padding: 8, textAlign: "left" }}>Price</th>
-        <th style={{ padding: 8, textAlign: "left" }}>Inventory</th>
-        <th style={{ padding: 8, textAlign: "left" }}>Action</th>
-      </tr>
-    </thead>
+                          <td style={{ ...tdStyle, minWidth: 180 }}>
+                            {!hasRealVariants ? (
+                              <InlineEditable
+                                value={tempWarehouse2[node.id] || ""}
+                                editing={isEditing(
+                                  "product",
+                                  node.id,
+                                  "warehouse2",
+                                )}
+                                onStartEdit={() =>
+                                  startEdit("product", node.id, "warehouse2")
+                                }
+                                onCancelEdit={cancelEdit}
+                                onSave={(v) =>
+                                  transferFromExternalWarehouse(
+                                    node.id,
+                                    firstVariant?.inventoryItem?.id,
+                                    qty,
+                                    warehouseQty,
+                                    v,
+                                  )
+                                }
+                                type="number"
+                              />
+                            ) : (
+                              <Text as="p" tone="subdued">
+                                —
+                              </Text>
+                            )}
+                          </td>
 
-    {/* Body */}
-    <tbody>
-      {variants.map((vr) => (
-        <tr key={vr.id} style={{ borderTop: "1px solid #e1e3e5" }}>
-          
-          {/* Title */}
-          <td style={{ padding: 8, width: 255 }}>
-            <strong>{vr.title}</strong>
-            {vr.sku ? (
-              <div style={{ fontSize: 12, opacity: 0.7 }}>
-                SKU: {vr.sku}
-              </div>
-            ) : null}
-          </td>
+                          <td style={{ ...tdStyle, minWidth: 160 }}>
+                            {!hasRealVariants ? (
+                              <InlineEditable
+                                value={node.reorderLevel || ""}
+                                editing={isEditing("product", node.id, "reorder")}
+                                onStartEdit={() =>
+                                  startEdit("product", node.id, "reorder")
+                                }
+                                onCancelEdit={cancelEdit}
+                                onSave={(v) => saveReorderLevel(node.id, v)}
+                                type="number"
+                              />
+                            ) : (
+                              <Text tone="subdued">—</Text>
+                            )}
+                          </td>
 
-          {/* Price */}
-          <td style={{ padding: 8 }}>
-            <InlineEditable
-  value={vr.price ? `₹${vr.price}` : "—"}
-  editing={isEditing("variant", vr.id, "price")}
-  onStartEdit={() =>
-    startEdit("variant", vr.id, "price")
-  }
-  onCancelEdit={cancelEdit}
-  onSave={(v) =>
-    saveProductPrice(node.id, vr.id, v)
-  }
-  type="text"
-/>
-          </td>
+                          <td style={{ ...tdStyle, minWidth: 260 }}>
+                            <InlineStack gap="200">
+                              {hasRealVariants && (
+                                <Button
+                                  size="slim"
+                                  onClick={() => {
+                                    cancelEdit();
+                                    setOpenVariantProductId(
+                                      isOpen ? null : node.id,
+                                    );
+                                  }}
+                                >
+                                  {isOpen ? "Hide Variants" : "Variants"}
+                                </Button>
+                              )}
 
-          {/* Inventory */}
-        <td style={{ padding: 8 }}>
-  <InlineEditable
-    value={String(vr.inventoryQuantity ?? "")}
-    editing={isEditing("variant", vr.id, "inventory")}
-    onStartEdit={() =>
-      startEdit("variant", vr.id, "inventory")
-    }
-    onCancelEdit={cancelEdit}
-    onSave={(v) =>
-      saveInventoryByInventoryItem(
-        vr.inventoryItem?.id,
-        v
-      )
-    }
-    type="number"
-  />
-</td>
-
-          {/* Action */}
-          <td style={{ padding: 8 }}>
-            <Button
-              tone="critical"
-              size="slim"
-              onClick={() =>
-                submit(
-                  { type: "delete-variant", variantId: vr.id },
-                  { method: "post" }
-                )
-
-              }
-            >
-              Delete
-            </Button>
-          </td>
-
-        </tr>
-      ))}
-    </tbody>
-  </table>
-</div>
+                              <Button
+                                tone="critical"
+                                size="slim"
+                                onClick={() => deleteProduct(node.id)}
+                              >
+                                Delete
+                              </Button>
+                            </InlineStack>
                           </td>
                         </tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
+
+                        {hasRealVariants && isOpen && (
+                          <tr>
+                            <td
+                              colSpan={8}
+                              style={{
+                                ...tdStyle,
+                                background: "#f6f6f7",
+                                paddingLeft: 40,
+                              }}
+                            >
+                              <Text variant="headingSm" as="p">
+                                Variants
+                              </Text>
+
+                              <div style={{ marginTop: 10 }}>
+                                <table
+                                  style={{
+                                    width: "100%",
+                                    borderCollapse: "collapse",
+                                  }}
+                                >
+                                  <thead>
+                                    <tr style={{ background: "#f6f6f7" }}>
+                                      <th
+                                        style={{ padding: 8, textAlign: "left" }}
+                                      >
+                                        Artikel
+                                      </th>
+                                      <th
+                                        style={{ padding: 8, textAlign: "left" }}
+                                      >
+                                        Price
+                                      </th>
+                                      <th
+                                        style={{ padding: 8, textAlign: "left" }}
+                                      >
+                                        Hauptlager
+                                      </th>
+                                      <th
+                                        style={{ padding: 8, textAlign: "left" }}
+                                      >
+                                        Action
+                                      </th>
+                                    </tr>
+                                  </thead>
+
+                                  <tbody>
+                                    {variants.map((vr) => (
+                                      <tr
+                                        key={vr.id}
+                                        style={{
+                                          borderTop: "1px solid #e1e3e5",
+                                        }}
+                                      >
+                                        <td style={{ padding: 8, width: 255 }}>
+                                          <strong>{vr.title}</strong>
+                                          {vr.sku ? (
+                                            <div
+                                              style={{
+                                                fontSize: 12,
+                                                opacity: 0.7,
+                                              }}
+                                            >
+                                              SKU: {vr.sku}
+                                            </div>
+                                          ) : null}
+                                        </td>
+
+                                        <td style={{ padding: 8 }}>
+                                          <InlineEditable
+                                            value={
+                                              vr.price ? `₹${vr.price}` : "—"
+                                            }
+                                            editing={isEditing(
+                                              "variant",
+                                              vr.id,
+                                              "price",
+                                            )}
+                                            onStartEdit={() =>
+                                              startEdit("variant", vr.id, "price")
+                                            }
+                                            onCancelEdit={cancelEdit}
+                                            onSave={(v) =>
+                                              saveProductPrice(node.id, vr.id, v)
+                                            }
+                                            type="text"
+                                          />
+                                        </td>
+
+                                        <td style={{ padding: 8 }}>
+                                          <InlineEditable
+                                            value={String(
+                                              vr.inventoryQuantity ?? "",
+                                            )}
+                                            editing={isEditing(
+                                              "variant",
+                                              vr.id,
+                                              "inventory",
+                                            )}
+                                            onStartEdit={() =>
+                                              startEdit(
+                                                "variant",
+                                                vr.id,
+                                                "inventory",
+                                              )
+                                            }
+                                            onCancelEdit={cancelEdit}
+                                            onSave={(v) =>
+                                              saveInventoryByInventoryItem(
+                                                vr.inventoryItem?.id,
+                                                v,
+                                              )
+                                            }
+                                            type="number"
+                                          />
+                                        </td>
+
+                                        <td style={{ padding: 8 }}>
+                                          <Button
+                                            tone="critical"
+                                            size="slim"
+                                            onClick={() =>
+                                              submit(
+                                                {
+                                                  type: "delete-variant",
+                                                  variantId: vr.id,
+                                                },
+                                                { method: "post" },
+                                              )
+                                            }
+                                          >
+                                            Delete
+                                          </Button>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
 
           <br />
 
-          {/* PAGINATION (Stable) */}
-          {/* PAGINATION (Page Based) */}
+          {/* PAGINATION */}
           <InlineStack align="space-between" gap="300">
-            {/* Previous */}
             <Button
               disabled={cursorStack.length === 0}
               onClick={() => {
@@ -1037,10 +1121,9 @@ const transferFromExternalWarehouse = async (
             </Button>
 
             <Text as="p" variant="bodySm" tone="subdued">
-              {cursorStack.length + 1}
+              Page {cursorStack.length + 1}
             </Text>
 
-            {/* Next */}
             <Button
               disabled={!pageInfo?.hasNextPage}
               variant="primary"

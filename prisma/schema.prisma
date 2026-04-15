@@ -39,12 +39,12 @@ model Session {
 }
 
 model ExternalWarehouse {
-  id        String   @id @default(cuid())
-  shop      String
-  productId String
-  warehouse String
-  alertQty  Int? 
-  updatedAt DateTime @updatedAt
+  id        String   @id @default(cuid())
+  shop      String
+  productId String
+  warehouse String
+  reorder   String?
+  updatedAt DateTime @updatedAt
 
-  @@unique([shop, productId], name: "shop_productId")
+  @@unique([shop, productId], name: "shop_productId")
 }
