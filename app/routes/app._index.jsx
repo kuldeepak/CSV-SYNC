@@ -195,25 +195,25 @@ export const action = async ({ request }) => {
   const type = form.get("type");
 
   if (type === "reorder-level") {
-  const { session } = await authenticate.admin(request);
-  const shop = session.shop;
+    const { session } = await authenticate.admin(request);
+    const shop = session.shop;
 
-  const productId = form.get("productId");
-  const reorder = form.get("reorder");
+    const productId = form.get("productId");
+    const reorder = form.get("reorder");
 
-  await db.externalWarehouse.upsert({
-    where: { shop_productId: { shop, productId } },
-    update: { reorder: String(reorder || "0") },   // ⭐ FIX
-    create: {
-      shop,
-      productId,
-      reorder: String(reorder || "0"),             // ⭐ FIX
-      warehouse: "0",
-    },
-  });
+    await db.externalWarehouse.upsert({
+      where: { shop_productId: { shop, productId } },
+      update: { reorder: String(reorder || "0") },   // ⭐ FIX
+      create: {
+        shop,
+        productId,
+        reorder: String(reorder || "0"),             // ⭐ FIX
+        warehouse: "0",
+      },
+    });
 
-  return json({ success: true });
-}
+    return json({ success: true });
+  }
 
   if (type === "delete-variant") {
     const variantId = form.get("variantId");
@@ -485,8 +485,8 @@ function InlineEditable({
         e.currentTarget.style.background = "#f6f6f7";
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.border = "1px solid transparent";
-        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.border = "1px solid #bbb";
+        e.currentTarget.style.background = "#f6f6f7";
       }}
     >
       {value ?? "—"}
@@ -725,7 +725,7 @@ export default function Index() {
             </InlineStack>
 
             {/* Info Text */}
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 10 }}>
               <Text as="p" variant="bodySm" tone="subdued">
                 Sortiert nach Titel
                 {q ? (
@@ -738,9 +738,12 @@ export default function Index() {
             </div>
 
             {/* ✅ FILTER DROPDOWN */}
-            <div style={{ marginTop: 16, maxWidth: 400 }}>
+            <div className="sfdfsdfsd" style={{
+              marginTop: 16, maxWidth: "100%", display: "flex", gap: 8, justifyContent: "space-between",
+              alignItems: "center"
+            }}>
               <Select
-                label="⚠️ Alert Filter"
+                label="Filter"
                 options={[
                   { label: "No Filter", value: "none" },
                   {
@@ -800,7 +803,7 @@ export default function Index() {
                     return (
                       <Fragment key={node.id}>
                         <tr style={{
-                          background: 
+                          background:
                             stockStatus.label === "Low" ? "rgba(255, 0, 0, 0.05)" : "transparent"
                         }}>
                           <td style={{ ...tdStyle, minWidth: 220 }}>
@@ -816,11 +819,11 @@ export default function Index() {
                             </div>
                           </td>
 
-                          <td style={{ ...tdStyle, minWidth: 120 }}>
+                          <td style={{ ...tdStyle, minWidth: 300 }}>
                             <Text as="p">{node.vendor || "—"}</Text>
                           </td>
 
-                          <td style={{ ...tdStyle, minWidth: 110 }}>
+                          <td style={{ ...tdStyle, minWidth: 110, textAlign: "center" }}>
                             {canEditRowInventory ? (
                               <InlineEditable
                                 value={String(qty)}
