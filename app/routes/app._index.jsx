@@ -65,9 +65,9 @@ function buildProductsQuery(raw) {
 // ✅ Stock status - triggers at <= 5 for "low"
 const getStockStatus = (qty) => {
   const count = Number(qty) || 0;
-  if (count <= 5) return { label: "Low", tone: "critical" };
-  if (count <= 20) return { label: "Medium", tone: "warning" };
-  return { label: "Healthy", tone: "success" };
+  if (count <= 5) return { label: "Niedrig", tone: "critical" };
+  if (count <= 20) return { label: "Mittel", tone: "warning" };
+  return { label: "Gesund", tone: "success" };
 };
 
 /* =======================
@@ -680,12 +680,12 @@ export default function Index() {
           >
             <Spinner size="large" />
             <div style={{ marginTop: 16, fontSize: 16, fontWeight: 500 }}>
-              Please wait...
+              Bitte warten...
             </div>
           </div>
         </div>
       )}
-      <Page title="Inventory Manager">
+      <Page title="Lagerverwalter">
         <Card>
           {/* SEARCH & FILTER SECTION */}
           <div style={{ padding: 16, borderBottom: "1px solid #e1e3e5" }}>
@@ -745,7 +745,7 @@ export default function Index() {
               <Select
                 label="Filter"
                 options={[
-                  { label: "No Filter", value: "none" },
+                  { label: "Kein Filter", value: "none" },
                   {
                     label: "🔴 Nur Hauptlager <= Außenlager",
                     value: "lowMain",
@@ -784,7 +784,7 @@ export default function Index() {
                 {filteredProducts.length === 0 ? (
                   <tr>
                     <td colSpan="8" style={{ ...tdStyle, textAlign: "center" }}>
-                      <Text tone="subdued">No products match this filter</Text>
+                      <Text tone="subdued">Keine Produkte entsprechen diesem Filter</Text>
                     </td>
                   </tr>
                 ) : (
@@ -824,29 +824,7 @@ export default function Index() {
                           </td>
 
                           <td style={{ ...tdStyle, minWidth: 110, textAlign: "center" }}>
-                            {canEditRowInventory ? (
-                              <InlineEditable
-                                value={String(qty)}
-                                editing={isEditing(
-                                  "product",
-                                  node.id,
-                                  "inventory",
-                                )}
-                                onStartEdit={() =>
-                                  startEdit("product", node.id, "inventory")
-                                }
-                                onCancelEdit={cancelEdit}
-                                onSave={(v) =>
-                                  saveInventoryByInventoryItem(
-                                    firstVariant?.inventoryItem?.id,
-                                    v,
-                                  )
-                                }
-                                type="number"
-                              />
-                            ) : (
-                              <Text as="p">{String(qty)}</Text>
-                            )}
+                            <Text as="p">{String(qty)}</Text>
                           </td>
 
                           {/* ✅ STATUS BADGE */}
@@ -858,24 +836,9 @@ export default function Index() {
 
                           <td style={{ ...tdStyle, minWidth: 120 }}>
                             {!hasRealVariants ? (
-                              <InlineEditable
-                                value={node.externalWarehouse || ""}
-                                editing={isEditing(
-                                  "product",
-                                  node.id,
-                                  "warehouse",
-                                )}
-                                onStartEdit={() =>
-                                  startEdit("product", node.id, "warehouse")
-                                }
-                                onCancelEdit={cancelEdit}
-                                onSave={(v) => saveWarehouse(node.id, v)}
-                                type="text"
-                              />
+                              <Text as="p">{node.externalWarehouse || "—"}</Text>
                             ) : (
-                              <Text as="p" tone="subdued">
-                                —
-                              </Text>
+                              <Text as="p" tone="subdued">—</Text>
                             )}
                           </td>
 
@@ -939,17 +902,11 @@ export default function Index() {
                                     );
                                   }}
                                 >
-                                  {isOpen ? "Hide Variants" : "Variants"}
+                                  {isOpen ? "Varianten ausblenden" : "Varianten"}
                                 </Button>
                               )}
 
-                              <Button
-                                tone="critical"
-                                size="slim"
-                                onClick={() => deleteProduct(node.id)}
-                              >
-                                Delete
-                              </Button>
+
                             </InlineStack>
                           </td>
                         </tr>
@@ -965,7 +922,7 @@ export default function Index() {
                               }}
                             >
                               <Text variant="headingSm" as="p">
-                                Variants
+                                Varianten
                               </Text>
 
                               <div style={{ marginTop: 10 }}>
@@ -985,18 +942,15 @@ export default function Index() {
                                       <th
                                         style={{ padding: 8, textAlign: "left" }}
                                       >
-                                        Price
+
+                                        Preis
                                       </th>
                                       <th
                                         style={{ padding: 8, textAlign: "left" }}
                                       >
                                         Hauptlager
                                       </th>
-                                      <th
-                                        style={{ padding: 8, textAlign: "left" }}
-                                      >
-                                        Action
-                                      </th>
+
                                     </tr>
                                   </thead>
 
@@ -1023,24 +977,9 @@ export default function Index() {
                                         </td>
 
                                         <td style={{ padding: 8 }}>
-                                          <InlineEditable
-                                            value={
-                                              vr.price ? `₹${vr.price}` : "—"
-                                            }
-                                            editing={isEditing(
-                                              "variant",
-                                              vr.id,
-                                              "price",
-                                            )}
-                                            onStartEdit={() =>
-                                              startEdit("variant", vr.id, "price")
-                                            }
-                                            onCancelEdit={cancelEdit}
-                                            onSave={(v) =>
-                                              saveProductPrice(node.id, vr.id, v)
-                                            }
-                                            type="text"
-                                          />
+                                          <Text as="p">
+                                            {vr.price ? `€${vr.price}` : "—"}
+                                          </Text>
                                         </td>
 
                                         <td style={{ padding: 8 }}>
@@ -1069,24 +1008,6 @@ export default function Index() {
                                             }
                                             type="number"
                                           />
-                                        </td>
-
-                                        <td style={{ padding: 8 }}>
-                                          <Button
-                                            tone="critical"
-                                            size="slim"
-                                            onClick={() =>
-                                              submit(
-                                                {
-                                                  type: "delete-variant",
-                                                  variantId: vr.id,
-                                                },
-                                                { method: "post" },
-                                              )
-                                            }
-                                          >
-                                            Delete
-                                          </Button>
                                         </td>
                                       </tr>
                                     ))}
@@ -1120,11 +1041,11 @@ export default function Index() {
                 navigate(buildUrl({ q: q || "", after: prev || "" }));
               }}
             >
-              Previous
+              Vorherige
             </Button>
 
             <Text as="p" variant="bodySm" tone="subdued">
-              Page {cursorStack.length + 1}
+              Seite{cursorStack.length + 1}
             </Text>
 
             <Button
@@ -1138,7 +1059,7 @@ export default function Index() {
                 navigate(buildUrl({ q: q || "", after: lastCursor }));
               }}
             >
-              Next
+              Nächste
             </Button>
           </InlineStack>
         </Card>
