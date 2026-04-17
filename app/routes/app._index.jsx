@@ -835,11 +835,11 @@ export default function Index() {
                           </td>
 
                           <td style={{ ...tdStyle, minWidth: 120 }}>
-                            {!hasRealVariants ? (
-                              <Text as="p">{node.externalWarehouse || "—"}</Text>
-                            ) : (
-                              <Text as="p" tone="subdued">—</Text>
-                            )}
+                             {!hasRealVariants ? (
+    <Text as="p">{node.externalWarehouse || "—"}</Text>
+  ) : (
+    <Text as="p" tone="subdued">—</Text>
+  )}
                           </td>
 
                           <td style={{ ...tdStyle, minWidth: 180 }}>
@@ -906,7 +906,7 @@ export default function Index() {
                                 </Button>
                               )}
 
-
+                              
                             </InlineStack>
                           </td>
                         </tr>
@@ -942,15 +942,15 @@ export default function Index() {
                                       <th
                                         style={{ padding: 8, textAlign: "left" }}
                                       >
-
-                                        Preis
+                                        
+Preis
                                       </th>
                                       <th
                                         style={{ padding: 8, textAlign: "left" }}
                                       >
                                         Hauptlager
                                       </th>
-
+                                      
                                     </tr>
                                   </thead>
 
@@ -977,9 +977,9 @@ export default function Index() {
                                         </td>
 
                                         <td style={{ padding: 8 }}>
-                                          <Text as="p">
-                                            {vr.price ? `€${vr.price}` : "—"}
-                                          </Text>
+                                           <Text as="p">
+    {vr.price ? `€${vr.price}` : "—"}
+  </Text>
                                         </td>
 
                                         <td style={{ padding: 8 }}>

@@ -3,42 +3,54 @@ import csv from "csv-parser";
 import { Readable } from "stream";
 
 const SHEET_URL =
-  "https://docs.google.com/spreadsheets/d/1yvYDi5IwqAuFAkZDCLMban7oLwG_Ig9PC1P37V6DgEc/gviz/tq?tqx=out:csv";
+  "https://api.patagona.de/api/2/v/contracts/hlsoer/feeds/0210b28a-d30d-44ed-b6b1-baff07ff0434/export/feed.csv";
 
 export async function readSheetCSV() {
   try {
     const response = await axios.get(SHEET_URL, {
-      responseType: "text",
-      responseEncoding: "utf8",
-      timeout: 60000,
+      responseType: "arraybuffer",
+      timeout: 20000,
     });
 
     const rows = [];
 
+    // ⭐ Buffer → STRING stream (THIS is the missing piece)
+    const stream = Readable.from(response.data.toString("utf8"));
+
     return await new Promise((resolve, reject) => {
-      Readable.from(response.data)
+      stream
         .pipe(
           csv({
+            separator: ";",
             quote: '"',
             escape: '"',
             strict: false,
-            trim: false, // ❗ don't trim (keeps symbols/spaces)
+            trim: true,
+            mapHeaders: ({ header }) =>
+              header.replace(/"/g, "").trim(),
           })
         )
         .on("data", (row) => {
-          // Log raw row for debugging
-          console.log("RAW ROW:", row);
+  // keep exact CSV value but make Shopify-compatible
+  if (row["recommended price"]) {
+    const rawPrice = row["recommended price"].toString().trim();
 
-          rows.push(row); // push everything
-        })
+    // remove trailing semicolon if exists + convert decimal separator
+    row["recommended price"] = rawPrice
+      .replace(";", "")
+      .replace(",", ".");
+  }
+
+  rows.push(row);
+})
         .on("end", () => {
-          console.log("✅ Loaded", rows.length, "rows");
+          console.log("✅ CSV Loaded:", rows.length, "rows");
           resolve(rows);
         })
         .on("error", reject);
     });
   } catch (err) {
     console.error("❌ Fetch Error:", err.message);
-    throw new Error("Google Sheet read failed");
+    throw new Error("Sheet read failed");
   }
 }
