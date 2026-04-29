@@ -92,6 +92,26 @@ async function getValidOfflineSession() {
 // --------------------
 // GraphQL call helper
 // --------------------
+// async function graphqlForShop(shop, accessToken, query) {
+//   const res = await fetch(
+//     `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+//     {
+//       method: "POST",
+//       headers: {
+//         "Content-Type": "application/json",
+//         "X-Shopify-Access-Token": accessToken,
+//       },
+//       body: JSON.stringify({ query }),
+//     },
+//   );
+
+//   const json = await res.json();
+
+//   if (!res.ok) throw new Error(`HTTP ${res.status}: ${JSON.stringify(json)}`);
+//   if (json.errors) throw new Error(JSON.stringify(json.errors));
+//   return json.data;
+// }
+
 async function graphqlForShop(shop, accessToken, query) {
   const res = await fetch(
     `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
@@ -102,13 +122,26 @@ async function graphqlForShop(shop, accessToken, query) {
         "X-Shopify-Access-Token": accessToken,
       },
       body: JSON.stringify({ query }),
-    },
+    }
   );
 
   const json = await res.json();
 
+  // 👇 Handle throttling
+  if (json.extensions?.cost?.throttleStatus) {
+    const { currentlyAvailable, restoreRate } =
+      json.extensions.cost.throttleStatus;
+
+    if (currentlyAvailable < 50) {
+      const waitTime = Math.ceil((50 - currentlyAvailable) / restoreRate) * 1000;
+      console.log(`⏳ Throttled. Waiting ${waitTime}ms`);
+      await new Promise((r) => setTimeout(r, waitTime));
+    }
+  }
+
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${JSON.stringify(json)}`);
   if (json.errors) throw new Error(JSON.stringify(json.errors));
+
   return json.data;
 }
 
