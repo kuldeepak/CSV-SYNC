@@ -279,6 +279,7 @@ cron.schedule("*/3 * * * *", async () => {
     await runOnce();
   } catch (e) {
     console.error(e);
+    console.log("Will retry in 3 minutes...");
   } finally {
     isRunning = false;
   }
