@@ -130,7 +130,7 @@ async function runOnce() {
 
   const priceMap = {};
   for (const row of rows) {
-    const csvProductId = row["product id"]?.trim();
+   const csvProductId = String(row["product id"] || "").trim();
     const price = row["recommended price"];
 
     if (csvProductId && price) {
@@ -157,7 +157,7 @@ async function runOnce() {
             node {
               id
               sku
-              metafield(namespace: "custom", key: "omnia") {
+              omnia: metafield(namespace: "custom", key: "omnia") {
                 value
               }
               pricing: metafield(namespace: "custom", key: "pricing") {
@@ -176,10 +176,10 @@ async function runOnce() {
       const variant = edge.node;
       scanned++;
 
-     const omniaValue = variant.omnia?.value?.trim();
-      if (!omniaValue) continue;
+    const metafieldValue = variant.metafield?.value?.trim();
+      if (!metafieldValue) continue;
 
-      const csvPrice = priceMap[omniaValue];
+      const csvPrice = priceMap[metafieldValue];
       if (!csvPrice) continue;
 
       // 3️⃣ SAFE PARSE EXISTING JSON
