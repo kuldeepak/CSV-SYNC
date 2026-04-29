@@ -393,4 +393,4 @@ async function runOnce() {
 
 // ✅ don’t crash dev server
 runOnce().catch(console.error);
-cron.schedule("* * * * *", () => runOnce().catch(console.error));
+cron.schedule("*/3 * * * *", () => runOnce().catch(console.error));
