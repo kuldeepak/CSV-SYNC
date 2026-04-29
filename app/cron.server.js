@@ -190,7 +190,7 @@ async function runOnce() {
             node {
               id
               sku
-              metafield(namespace: "custom", key: "product_id") {
+              metafield(namespace: "custom", key: "omnia") {
                 value
               }
               pricing: metafield(namespace: "custom", key: "pricing") {
