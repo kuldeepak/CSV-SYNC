@@ -112,133 +112,6 @@ async function graphqlForShop(shop, accessToken, query) {
   return json.data;
 }
 
-// --------------------
-// Cron runner
-// --------------------
-
-// async function runOnce() {
-//   const { shop, token } = await getValidOfflineSession();
-
-//   const ping = await graphqlForShop(shop, token, `query { shop { name } }`);
-
-//   console.log("🚀 Pricing metafield sync started for:", ping.shop.name);
-
-//   // 1️⃣ LOAD CSV
-//   const rows = await readSheetCSV();
-//   console.log("✅ CSV Loaded:", rows.length, "rows");
-
-//   const priceMap = {};
-//   for (const row of rows) {
-//     const csvProductId = row["product id"]?.trim();
-//     const price = row["recommended price"];
-//     if (csvProductId && price) priceMap[csvProductId] = price;
-//   }
-
-//   console.log("🧾 CSV Products:", Object.keys(priceMap).length);
-
-//   // 2️⃣ PAGINATION
-//   let hasNextPage = true;
-//   let cursor = null;
-//   let updated = 0;
-//   let scanned = 0;
-
-//   while (hasNextPage) {
-//     const data = await graphqlForShop(
-//       shop,
-//       token,
-//       `{
-//         productVariants(first: 250, after: ${cursor ? `"${cursor}"` : null}) {
-//           pageInfo { hasNextPage endCursor }
-//           edges {
-//             node {
-//               id
-//               sku
-//               metafield(namespace: "custom", key: "product_id") {
-//                 value
-//               }
-//               pricing: metafield(namespace: "custom", key: "pricing") {
-//                 value
-//               }
-//             }
-//           }
-//         }
-//       }`,
-//     );
-
-//     const variants = data.productVariants.edges;
-//     console.log("📦 Scanning batch:", variants.length);
-
-//     for (const edge of variants) {
-//       const variant = edge.node;
-//       scanned++;
-
-//       const metafieldValue = variant.metafield?.value;
-//       if (!metafieldValue) continue;
-
-//       const csvPrice = priceMap[metafieldValue];
-//       if (!csvPrice) continue;
-
-//       // 3️⃣ PARSE EXISTING METAFIELD SAFELY
-//       let existingPricing = {};
-
-//       try {
-//         existingPricing = variant.pricing?.value
-//           ? JSON.parse(variant.pricing.value)
-//           : {};
-//       } catch (e) {
-//         existingPricing = {};
-//       }
-
-//       // 4️⃣ MERGE (IMPORTANT PART)
-//       const pricingJSON = JSON.stringify({
-//         base_price:
-//           existingPricing.base_price !== undefined
-//             ? existingPricing.base_price
-//             : null,
-//         base_price_google: csvPrice,
-//         base_price_idealo: csvPrice,
-//       });
-
-//       // escape for GraphQL string
-//       const escapedJSON = pricingJSON.replace(/"/g, '\\"');
-
-//       console.log("💰 Updating metafield for SKU:", variant.sku);
-
-//       try {
-//         await graphqlForShop(
-//           shop,
-//           token,
-//           `mutation {
-//             metafieldsSet(metafields: [
-//               {
-//                 ownerId: "${variant.id}"
-//                 namespace: "custom"
-//                 key: "pricing"
-//                 type: "json"
-//                 value: "${escapedJSON}"
-//               }
-//             ]) {
-//               userErrors { field message }
-//             }
-//           }`,
-//         );
-
-//         updated++;
-//         await new Promise((r) => setTimeout(r, 200));
-//       } catch (err) {
-//         console.log("❌ Update failed:", err.message);
-//       }
-//     }
-
-//     hasNextPage = data.productVariants.pageInfo.hasNextPage;
-//     cursor = data.productVariants.pageInfo.endCursor;
-//   }
-
-//   console.log("──────── SYNC COMPLETE ────────");
-//   console.log("Variants scanned:", scanned);
-//   console.log("Variants updated:", updated);
-//   console.log("───────────────────────────────");
-// }
 
 async function runOnce() {
   const { shop, token } = await getValidOfflineSession();
@@ -278,13 +151,13 @@ async function runOnce() {
       shop,
       token,
       `{
-        productVariants(first: 250, after: ${cursor ? `"${cursor}"` : null}) {
+        productVariants(first: 100, after: ${cursor ? `"${cursor}"` : null}) {
           pageInfo { hasNextPage endCursor }
           edges {
             node {
               id
               sku
-              metafield(namespace: "custom", key: "omnia") {
+              metafield(namespace: "custom", key: "product_id") {
                 value
               }
               pricing: metafield(namespace: "custom", key: "pricing") {
@@ -393,4 +266,20 @@ async function runOnce() {
 
 // ✅ don’t crash dev server
 runOnce().catch(console.error);
-cron.schedule("*/3 * * * *", () => runOnce().catch(console.error));
+let isRunning = false;
+
+cron.schedule("*/3 * * * *", async () => {
+  if (isRunning) {
+    console.log("⏳ Skipping run (already running)");
+    return;
+  }
+
+  isRunning = true;
+  try {
+    await runOnce();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    isRunning = false;
+  }
+});
