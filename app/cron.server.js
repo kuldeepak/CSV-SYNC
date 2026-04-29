@@ -176,7 +176,8 @@ async function runOnce() {
       const variant = edge.node;
       scanned++;
 
-    const metafieldValue = variant.metafield?.value?.trim();
+      // ✅ FIX: Changed from variant.metafield to variant.omnia (use the alias)
+      const metafieldValue = variant.omnia?.value?.trim();
       if (!metafieldValue) continue;
 
       const csvPrice = priceMap[metafieldValue];
@@ -264,7 +265,7 @@ async function runOnce() {
 }
 
 
-// ✅ don’t crash dev server
+// ✅ don't crash dev server
 runOnce().catch(console.error);
 let isRunning = false;
 
