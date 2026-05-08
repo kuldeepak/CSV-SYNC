@@ -324,17 +324,16 @@ export const action = async ({ request }) => {
   }
 
   // -------------------------------------------------------
-  // NEW ACTION: transfer-to-aussenlager
-  // Updates custom.aussenlager = newAussenlager
-  // Updates custom.hauptlager  = currentHauptlager - newAussenlager
-  // Both metafields are set via metafieldsSet on the variant.
+  // ACTION: transfer-to-aussenlager
+  // Sets custom.aussenlager = newAussenlager
+  // Sets custom.hauptlager  = shopifyInventory - newAussenlager
   // -------------------------------------------------------
   if (type === "transfer-to-aussenlager") {
     const variantId = form.get("variantId");
     const newAussenlager = parseInt(form.get("newAussenlager"), 10) || 0;
-    const currentHauptlager = parseInt(form.get("currentHauptlager"), 10) || 0;
+    const shopifyInventory = parseInt(form.get("shopifyInventory"), 10) || 0;
 
-    const newHauptlager = currentHauptlager - newAussenlager;
+    const newHauptlager = shopifyInventory - newAussenlager;
 
     const result = await admin.graphql(
       `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
@@ -351,7 +350,7 @@ export const action = async ({ request }) => {
               namespace: "custom",
               key: "aussenlager",
               value: String(newAussenlager),
-              // Use "number_integer" if these metafields were created as integers,
+              // Use "number_integer" if metafields were created as integers,
               // or "single_line_text_field" if created as text.
               type: "number_integer",
             },
@@ -360,6 +359,42 @@ export const action = async ({ request }) => {
               namespace: "custom",
               key: "hauptlager",
               value: String(newHauptlager),
+              type: "number_integer",
+            },
+          ],
+        },
+      },
+    );
+
+    const d = await result.json();
+    const errors = d.data?.metafieldsSet?.userErrors;
+    if (errors?.length) return json({ success: false, errors });
+    return json({ success: true });
+  }
+
+  // -------------------------------------------------------
+  // ACTION: update-melde
+  // Updates custom.melde metafield on a variant
+  // -------------------------------------------------------
+  if (type === "update-melde") {
+    const variantId = form.get("variantId");
+    const melde = form.get("melde");
+
+    const result = await admin.graphql(
+      `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { key value }
+          userErrors { field message }
+        }
+      }`,
+      {
+        variables: {
+          metafields: [
+            {
+              ownerId: variantId,
+              namespace: "custom",
+              key: "melde",
+              value: String(melde || "0"),
               type: "number_integer",
             },
           ],
@@ -629,9 +664,9 @@ export default function Index() {
     submit({ type: "reorder-level", productId, reorder }, { method: "post" });
   };
 
-  // Updated: sets custom.aussenlager = inputQty,
-  // and custom.hauptlager = currentHauptlager - inputQty
-  const transferToAussenlager = (variantId, currentHauptlager, productId, inputQty) => {
+  // Sets custom.aussenlager = inputQty
+  // Sets custom.hauptlager  = shopifyInventory (qty) - inputQty
+  const transferToAussenlager = (variantId, shopifyInventory, productId, inputQty) => {
     const newAussenlager = Number(inputQty) || 0;
     if (newAussenlager <= 0) return;
 
@@ -640,7 +675,7 @@ export default function Index() {
         type: "transfer-to-aussenlager",
         variantId,
         newAussenlager: String(newAussenlager),
-        currentHauptlager: String(Number(currentHauptlager) || 0),
+        shopifyInventory: String(Number(shopifyInventory) || 0),
       },
       { method: "post" },
     );
@@ -649,6 +684,14 @@ export default function Index() {
       ...prev,
       [productId]: "",
     }));
+  };
+
+  // Saves custom.melde metafield via Shopify API
+  const saveMelde = (variantId, melde) => {
+    submit(
+      { type: "update-melde", variantId, melde: String(melde || "0") },
+      { method: "post" },
+    );
   };
 
   const deleteProduct = (productId) =>
@@ -830,7 +873,7 @@ export default function Index() {
                   <th style={thStyle}>Artikel</th>
                   <th style={thStyle}>Hersteller</th>
                   {/* Renamed: was "Hauptlager", now shows real Shopify stock */}
-                  <th style={thStyle}>Inventory</th>
+                  <th style={thStyle}>Inventar</th>
                   <th style={thStyle}>Status</th>
                   {/* New column: shows custom.hauptlager metafield */}
                   <th style={thStyle}>Hauptlager</th>
@@ -949,7 +992,7 @@ export default function Index() {
                             )}
                           </td>
 
-                          {/* Außenlager Neu: input that triggers metafield update */}
+                          {/* Außenlager Neu: aussenlager = entered, hauptlager = inventar - entered */}
                           <td style={{ ...tdStyle, minWidth: 180 }}>
                             {!hasRealVariants ? (
                               <InlineEditable
@@ -966,7 +1009,7 @@ export default function Index() {
                                 onSave={(v) =>
                                   transferToAussenlager(
                                     firstVariant?.id,
-                                    currentHauptlager,
+                                    qty,        // shopify inventar stock
                                     node.id,
                                     v,
                                   )
@@ -983,7 +1026,18 @@ export default function Index() {
                           <td style={{ ...tdStyle, minWidth: 160 }}>
                             {!hasRealVariants ? (
                               <InlineStack gap="200" blockAlign="center">
-                                <Text as="p">{meldeValue}</Text>
+                                <InlineEditable
+                                  value={meldeValue === "—" ? "" : meldeValue}
+                                  editing={isEditing("product", node.id, "melde")}
+                                  onStartEdit={() =>
+                                    startEdit("product", node.id, "melde")
+                                  }
+                                  onCancelEdit={cancelEdit}
+                                  onSave={(v) =>
+                                    saveMelde(firstVariant?.id, v)
+                                  }
+                                  type="number"
+                                />
                                 {isRedZone && (
                                   <Badge tone="critical">🔴 Rot</Badge>
                                 )}
@@ -1059,7 +1113,7 @@ export default function Index() {
                                           textAlign: "left",
                                         }}
                                       >
-                                        Inventory
+                                        Inventar
                                       </th>
                                     </tr>
                                   </thead>
