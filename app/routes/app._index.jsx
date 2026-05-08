@@ -676,12 +676,18 @@ export default function Index() {
                       : firstVariant?.aussenlager?.value ?? "—";
 
                     const hauptlagerValue = hasRealVariants
-                      ? totalHauptlager > 0 ? String(totalHauptlager) : "—"
-                      : firstVariant?.hauptlager?.value ?? "—";
+  ? totalHauptlager > 0 ? String(totalHauptlager) : "—"
+  : firstVariant?.hauptlager?.value
+    ? firstVariant.hauptlager.value
+    : String(
+        (Number(firstVariant?.inventoryQuantity) || 0) -
+        (Number(firstVariant?.aussenlager?.value) || 0)
+      );
 
-                    const currentHauptlager = hasRealVariants
-                      ? totalHauptlager
-                      : Number(firstVariant?.hauptlager?.value) || 0;
+                   const currentHauptlager = hasRealVariants
+  ? totalHauptlager
+  : Number(firstVariant?.hauptlager?.value) ||
+    ((Number(firstVariant?.inventoryQuantity) || 0) - (Number(firstVariant?.aussenlager?.value) || 0));
 
                     const meldeValue = !hasRealVariants
                       ? firstVariant?.melde?.value ?? "—"
@@ -879,3 +885,6 @@ export default function Index() {
     </>
   );
 }
+
+
+
