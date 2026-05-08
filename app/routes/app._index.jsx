@@ -1037,25 +1037,14 @@ export default function Index() {
                           </td>
 
                           {/* Hauptlager: custom.hauptlager metafield */}
+                          {/* Hauptlager: custom.hauptlager metafield — sum for variants, direct for single */}
                           <td style={{ ...tdStyle, minWidth: 120 }}>
-                            {!hasRealVariants ? (
-                              <Text as="p">{hauptlagerValue}</Text>
-                            ) : (
-                              <Text as="p" tone="subdued">
-                                —
-                              </Text>
-                            )}
+                            <Text as="p">{hauptlagerValue}</Text>
                           </td>
 
-                          {/* Außenlager: custom.aussenlager metafield (read from Shopify) */}
+                          {/* Außenlager: custom.aussenlager metafield — sum for variants, direct for single */}
                           <td style={{ ...tdStyle, minWidth: 120 }}>
-                            {!hasRealVariants ? (
-                              <Text as="p">{aussenlagerValue}</Text>
-                            ) : (
-                              <Text as="p" tone="subdued">
-                                —
-                              </Text>
-                            )}
+                            <Text as="p">{aussenlagerValue}</Text>
                           </td>
 
                           {/* Außenlager Neu: aussenlager = entered, hauptlager = inventar - entered */}
