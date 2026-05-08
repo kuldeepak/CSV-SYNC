@@ -749,7 +749,15 @@ export default function Index() {
       ? variants.reduce((sum, v) => sum + Number(v.inventoryQuantity || 0), 0)
       : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
 
-    return { variants, firstVariant, hasRealVariants, qty };
+    // Sum metafield values across all variants for the product-level display
+    const totalAussenlager = variants.reduce(
+      (sum, v) => sum + (Number(v.aussenlager?.value) || 0), 0
+    );
+    const totalHauptlager = variants.reduce(
+      (sum, v) => sum + (Number(v.hauptlager?.value) || 0), 0
+    );
+
+    return { variants, firstVariant, hasRealVariants, qty, totalAussenlager, totalHauptlager };
   };
 
   // APPLY FILTERS — products are already pre-sorted by loader (aussenlager first)
@@ -951,23 +959,27 @@ export default function Index() {
                   </tr>
                 ) : (
                   filteredProducts.map(({ node, cursor }) => {
-                    const { variants, firstVariant, hasRealVariants, qty } =
+                    const { variants, firstVariant, hasRealVariants, qty, totalAussenlager, totalHauptlager } =
                       getRowInfo(node);
                     const isOpen = openVariantProductId === node.id;
                     const reorderLevel = Number(node.reorderLevel) || 0;
                     const canEditRowInventory = !hasRealVariants;
 
-                    // Values from Shopify metafields (always up-to-date via loader)
-                    const aussenlagerValue = !hasRealVariants
-                      ? firstVariant?.aussenlager?.value ?? "—"
-                      : "—";
-                    const hauptlagerValue = !hasRealVariants
-                      ? firstVariant?.hauptlager?.value ?? "—"
-                      : "—";
-                    const currentHauptlager =
-                      Number(firstVariant?.hauptlager?.value) || 0;
+                    // For single-variant products use metafield directly;
+                    // for multi-variant products show the SUM across all variants.
+                    const aussenlagerValue = hasRealVariants
+                      ? totalAussenlager > 0 ? String(totalAussenlager) : "—"
+                      : firstVariant?.aussenlager?.value ?? "—";
 
-                    // Meldebestand from custom.melde metafield
+                    const hauptlagerValue = hasRealVariants
+                      ? totalHauptlager > 0 ? String(totalHauptlager) : "—"
+                      : firstVariant?.hauptlager?.value ?? "—";
+
+                    const currentHauptlager = hasRealVariants
+                      ? totalHauptlager
+                      : Number(firstVariant?.hauptlager?.value) || 0;
+
+                    // Meldebestand from custom.melde metafield (single-variant only)
                     const meldeValue = !hasRealVariants
                       ? firstVariant?.melde?.value ?? "—"
                       : "—";
@@ -1145,29 +1157,23 @@ export default function Index() {
                                 >
                                   <thead>
                                     <tr style={{ background: "#f6f6f7" }}>
-                                      <th
-                                        style={{
-                                          padding: 8,
-                                          textAlign: "left",
-                                        }}
-                                      >
+                                      <th style={{ padding: 8, textAlign: "left" }}>
                                         Artikel
                                       </th>
-                                      <th
-                                        style={{
-                                          padding: 8,
-                                          textAlign: "left",
-                                        }}
-                                      >
+                                      <th style={{ padding: 8, textAlign: "left" }}>
                                         Preis
                                       </th>
-                                      <th
-                                        style={{
-                                          padding: 8,
-                                          textAlign: "left",
-                                        }}
-                                      >
+                                      <th style={{ padding: 8, textAlign: "left" }}>
                                         Inventar
+                                      </th>
+                                      <th style={{ padding: 8, textAlign: "left" }}>
+                                        Hauptlager
+                                      </th>
+                                      <th style={{ padding: 8, textAlign: "left" }}>
+                                        Außenlager
+                                      </th>
+                                      <th style={{ padding: 8, textAlign: "left" }}>
+                                        Meldebestand
                                       </th>
                                     </tr>
                                   </thead>
@@ -1176,19 +1182,12 @@ export default function Index() {
                                     {variants.map((vr) => (
                                       <tr
                                         key={vr.id}
-                                        style={{
-                                          borderTop: "1px solid #e1e3e5",
-                                        }}
+                                        style={{ borderTop: "1px solid #e1e3e5" }}
                                       >
-                                        <td style={{ padding: 8, width: 255 }}>
+                                        <td style={{ padding: 8, width: 220 }}>
                                           <strong>{vr.title}</strong>
                                           {vr.sku ? (
-                                            <div
-                                              style={{
-                                                fontSize: 12,
-                                                opacity: 0.7,
-                                              }}
-                                            >
+                                            <div style={{ fontSize: 12, opacity: 0.7 }}>
                                               SKU: {vr.sku}
                                             </div>
                                           ) : null}
@@ -1200,30 +1199,40 @@ export default function Index() {
                                           </Text>
                                         </td>
 
+                                        {/* Inventar: editable Shopify stock */}
                                         <td style={{ padding: 8 }}>
                                           <InlineEditable
-                                            value={String(
-                                              vr.inventoryQuantity ?? "",
-                                            )}
-                                            editing={isEditing(
-                                              "variant",
-                                              vr.id,
-                                              "inventory",
-                                            )}
-                                            onStartEdit={() =>
-                                              startEdit(
-                                                "variant",
-                                                vr.id,
-                                                "inventory",
-                                              )
-                                            }
+                                            value={String(vr.inventoryQuantity ?? "")}
+                                            editing={isEditing("variant", vr.id, "inventory")}
+                                            onStartEdit={() => startEdit("variant", vr.id, "inventory")}
                                             onCancelEdit={cancelEdit}
-                                            onSave={(v) =>
-                                              saveInventoryByInventoryItem(
-                                                vr.inventoryItem?.id,
-                                                v,
-                                              )
-                                            }
+                                            onSave={(v) => saveInventoryByInventoryItem(vr.inventoryItem?.id, v)}
+                                            type="number"
+                                          />
+                                        </td>
+
+                                        {/* Hauptlager: custom.hauptlager metafield (read-only) */}
+                                        <td style={{ padding: 8 }}>
+                                          <Text as="p">
+                                            {vr.hauptlager?.value ?? "—"}
+                                          </Text>
+                                        </td>
+
+                                        {/* Außenlager: custom.aussenlager metafield (read-only) */}
+                                        <td style={{ padding: 8 }}>
+                                          <Text as="p">
+                                            {vr.aussenlager?.value ?? "—"}
+                                          </Text>
+                                        </td>
+
+                                        {/* Meldebestand: custom.melde metafield (editable) */}
+                                        <td style={{ padding: 8 }}>
+                                          <InlineEditable
+                                            value={vr.melde?.value ?? ""}
+                                            editing={isEditing("variant", vr.id, "melde")}
+                                            onStartEdit={() => startEdit("variant", vr.id, "melde")}
+                                            onCancelEdit={cancelEdit}
+                                            onSave={(v) => saveMelde(vr.id, v)}
                                             type="number"
                                           />
                                         </td>
