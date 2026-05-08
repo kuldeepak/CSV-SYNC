@@ -192,6 +192,20 @@ export const loader = async ({ request }) => {
     },
   }));
 
+  // Server-side sort: products whose first variant has a non-empty
+  // custom.aussenlager metafield value are promoted to the top.
+  // Within each group the original Shopify title order is preserved.
+  const getAussenlagerValue = (edge) => {
+    const firstVariant = edge.node.variants?.edges?.[0]?.node;
+    return Number(firstVariant?.aussenlager?.value) || 0;
+  };
+
+  productsWithWarehouse.sort((a, b) => {
+    const aHas = getAussenlagerValue(a) > 0 ? 1 : 0;
+    const bHas = getAussenlagerValue(b) > 0 ? 1 : 0;
+    return bHas - aHas; // products with Außenlager come first
+  });
+
   return json({
     products: productsWithWarehouse,
     pageInfo: data.data.products.pageInfo,
@@ -738,9 +752,9 @@ export default function Index() {
     return { variants, firstVariant, hasRealVariants, qty };
   };
 
-  // APPLY FILTERS + sort: products with Außenlager value float to top
+  // APPLY FILTERS — products are already pre-sorted by loader (aussenlager first)
   const filteredProducts = useMemo(() => {
-    const filtered = products.filter(({ node }) => {
+    return products.filter(({ node }) => {
       const { firstVariant } = getRowInfo(node);
       const warehouseQty = Number(firstVariant?.aussenlager?.value) || 0;
       const hauptlagerQty = Number(firstVariant?.hauptlager?.value) || 0;
@@ -755,15 +769,7 @@ export default function Index() {
       }
       return true;
     });
-
-    // Sort: products that have an Außenlager value bubble to the top
-    return [...filtered].sort((a, b) => {
-      const { firstVariant: fvA } = getRowInfo(a.node);
-      const { firstVariant: fvB } = getRowInfo(b.node);
-      const aHas = Number(fvA?.aussenlager?.value) > 0 ? 1 : 0;
-      const bHas = Number(fvB?.aussenlager?.value) > 0 ? 1 : 0;
-      return bHas - aHas; // products with Außenlager first
-    });
+    // No extra sort needed — server already delivered aussenlager-first order
   }, [products, filterType]);
 
   return (
