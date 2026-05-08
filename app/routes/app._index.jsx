@@ -700,7 +700,7 @@ export default function Index() {
                   <th style={thStyle}>Artikel</th>
                   <th style={thStyle}>Hersteller</th>
                   <th style={thStyle}>Inventar</th>
-                  <th style={thStyle}>Status</th>
+                  {/* <th style={thStyle}>Status</th> */}
                   <th style={thStyle}>Hauptlager</th>
                   <th style={thStyle}>Außenlager</th>
                   <th style={thStyle}>Außenlager Neu</th>
@@ -773,9 +773,9 @@ export default function Index() {
                           </td>
 
                           {/* Status */}
-                          <td style={{ ...tdStyle, minWidth: 100 }}>
+                          {/* <td style={{ ...tdStyle, minWidth: 100 }}>
                             <Badge tone={stockStatus.tone}>{stockStatus.label}</Badge>
-                          </td>
+                          </td> */}
 
                           {/* Hauptlager */}
                           <td style={{ ...tdStyle, minWidth: 110 }}>
