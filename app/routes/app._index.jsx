@@ -66,12 +66,9 @@ const getStockStatus = (qty) => {
    Filter 1: Hauptlager <= Außenlager
    Filter 2: Hauptlager - Melde <= Außenlager
 ======================= */
-
-// Filter 1: show product when main stock <= outside stock
 const filterLowMainInventory = (hauptlagerQty, aussenlagerQty) =>
   hauptlagerQty <= aussenlagerQty;
 
-// Filter 2: show product when (main stock - reorder threshold) <= outside stock
 const filterLowAfterReorder = (hauptlagerQty, meldeQty, aussenlagerQty) =>
   hauptlagerQty - meldeQty <= aussenlagerQty;
 
@@ -173,7 +170,6 @@ export const loader = async ({ request }) => {
     },
   }));
 
-  // Only products where at least one variant has aussenlager > 0
   const withAussenlager = allProducts.filter((edge) => edgeTotalAussenlager(edge) > 0);
 
   const totalCount   = withAussenlager.length;
@@ -288,12 +284,54 @@ export const action = async ({ request }) => {
     return json({ success: true });
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // TRANSFER TO AUSSENLAGER
+  //
+  // Normal:   hauptlager = shopifyInventory - newAussenlager
+  //
+  // If that result is 0 or negative:
+  //   → fetch real Shopify on-hand (available + committed)
+  //   → use that as hauptlager instead
+  //   → this way hauptlager always reflects true warehouse reality
+  // ─────────────────────────────────────────────────────────────────────
   if (type === "transfer-to-aussenlager") {
     const variantId        = form.get("variantId");
+    const inventoryItemId  = form.get("inventoryItemId");           // needed to fetch on-hand
     const newAussenlager   = parseInt(form.get("newAussenlager"),   10) || 0;
     const shopifyInventory = parseInt(form.get("shopifyInventory"), 10) || 0;
-    const newHauptlager    = shopifyInventory - newAussenlager;
+    let   newHauptlager    = shopifyInventory - newAussenlager;
 
+    // ── If hauptlager would be 0 or negative, replace it with real on-hand ──
+    if (newHauptlager <= 0 && inventoryItemId) {
+      const onHandRes = await admin.graphql(
+        `query getOnHand($id: ID!) {
+          inventoryItem(id: $id) {
+            inventoryLevels(first: 1) {
+              edges {
+                node {
+                  quantities(names: ["available", "committed"]) {
+                    name
+                    quantity
+                  }
+                }
+              }
+            }
+          }
+        }`,
+        { variables: { id: inventoryItemId } },
+      );
+      const onHandData = await onHandRes.json();
+      const quantities =
+        onHandData.data?.inventoryItem?.inventoryLevels?.edges[0]?.node?.quantities || [];
+
+      const available = quantities.find((q) => q.name === "available")?.quantity || 0;
+      const committed = quantities.find((q) => q.name === "committed")?.quantity || 0;
+
+      // available + committed = on hand (what Shopify physically has)
+      newHauptlager = available + committed;
+    }
+
+    // ── Write both metafields with the corrected hauptlager value ──
     const result = await admin.graphql(
       `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
@@ -304,8 +342,14 @@ export const action = async ({ request }) => {
       {
         variables: {
           metafields: [
-            { ownerId: variantId, namespace: "custom", key: "aussenlager", value: String(newAussenlager), type: "number_integer" },
-            { ownerId: variantId, namespace: "custom", key: "hauptlager",  value: String(newHauptlager),  type: "number_integer" },
+            {
+              ownerId: variantId, namespace: "custom", key: "aussenlager",
+              value: String(newAussenlager), type: "number_integer",
+            },
+            {
+              ownerId: variantId, namespace: "custom", key: "hauptlager",
+              value: String(newHauptlager), type: "number_integer",
+            },
           ],
         },
       },
@@ -329,7 +373,10 @@ export const action = async ({ request }) => {
       {
         variables: {
           metafields: [
-            { ownerId: variantId, namespace: "custom", key: "melde", value: String(melde || "0"), type: "number_integer" },
+            {
+              ownerId: variantId, namespace: "custom", key: "melde",
+              value: String(melde || "0"), type: "number_integer",
+            },
           ],
         },
       },
@@ -498,13 +545,16 @@ export default function Index() {
   const saveInventoryByInventoryItem = (inventoryItemId, quantity) =>
     submit({ type: "variant-inventory", inventoryItemId, quantity }, { method: "post" });
 
-  const transferToAussenlager = (variantId, shopifyInventory, productId, inputQty) => {
+  // ── CHANGED: accepts inventoryItemId and forwards it so the action
+  //    can fetch on-hand if hauptlager would go 0 or negative ──
+  const transferToAussenlager = (variantId, inventoryItemId, shopifyInventory, productId, inputQty) => {
     const newAussenlager = Number(inputQty) || 0;
     if (newAussenlager <= 0) return;
     submit(
       {
-        type: "transfer-to-aussenlager",
+        type:             "transfer-to-aussenlager",
         variantId,
+        inventoryItemId,                              // ← forwarded to action
         newAussenlager:   String(newAussenlager),
         shopifyInventory: String(Number(shopifyInventory) || 0),
       },
@@ -529,7 +579,6 @@ export default function Index() {
       if (filtered.length > 0) variants = filtered;
     }
 
-    // Variants with higher aussenlager sort first
     variants = [...variants].sort(
       (a, b) => (Number(b.aussenlager?.value) || 0) - (Number(a.aussenlager?.value) || 0),
     );
@@ -547,51 +596,32 @@ export default function Index() {
     return { variants, firstVariant, hasRealVariants, qty, totalAussenlager, totalHauptlager };
   };
 
-  /* =======================
-     CLIENT-SIDE FILTER
-     ── "none"            : show all (server guarantees aussenlager > 0)
-     ── "lowMain"         : Hauptlager <= Außenlager
-     ── "lowAfterReorder" : Hauptlager - Melde <= Außenlager
-     For multi-variant: aggregate all variant metafield values
-  ======================= */
   const filteredProducts = useMemo(() => {
     return products.filter(({ node }) => {
       const { variants, firstVariant, hasRealVariants, totalAussenlager, totalHauptlager } =
         getRowInfo(node);
 
-      // Guard: no aussenlager means skip
       if (totalAussenlager <= 0) return false;
-
-      // No filter — show everything
       if (filterType === "none") return true;
 
       if (!hasRealVariants) {
-        // ── Single-variant ──
         const hauptlagerQty =
           Number(firstVariant?.hauptlager?.value) ||
           (Number(firstVariant?.inventoryQuantity) || 0) -
             (Number(firstVariant?.aussenlager?.value) || 0);
-
         const meldeQty       = Number(firstVariant?.melde?.value)       || 0;
         const aussenlagerQty = Number(firstVariant?.aussenlager?.value) || 0;
 
         if (filterType === "lowMain")
-          // 🔴 Hauptlager <= Außenlager
           return filterLowMainInventory(hauptlagerQty, aussenlagerQty);
-
         if (filterType === "lowAfterReorder")
-          // 🟠 Hauptlager - Melde <= Außenlager
           return filterLowAfterReorder(hauptlagerQty, meldeQty, aussenlagerQty);
-
       } else {
-        // ── Multi-variant: sum across all variants ──
         const totalMelde = variants.reduce(
           (sum, v) => sum + (Number(v.melde?.value) || 0), 0,
         );
-
         if (filterType === "lowMain")
           return filterLowMainInventory(totalHauptlager, totalAussenlager);
-
         if (filterType === "lowAfterReorder")
           return filterLowAfterReorder(totalHauptlager, totalMelde, totalAussenlager);
       }
@@ -603,21 +633,17 @@ export default function Index() {
   return (
     <>
       {isPageLoading && (
-        <div
-          style={{
-            position: "fixed", top: 0, left: 0,
-            width: "100vw", height: "100vh",
-            background: "rgba(0,0,0,0.4)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            zIndex: 9999,
-          }}
-        >
-          <div
-            style={{
-              background: "#fff", padding: "40px 60px", borderRadius: 16,
-              boxShadow: "0 10px 30px rgba(0,0,0,0.2)", textAlign: "center",
-            }}
-          >
+        <div style={{
+          position: "fixed", top: 0, left: 0,
+          width: "100vw", height: "100vh",
+          background: "rgba(0,0,0,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 9999,
+        }}>
+          <div style={{
+            background: "#fff", padding: "40px 60px", borderRadius: 16,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.2)", textAlign: "center",
+          }}>
             <Spinner size="large" />
             <div style={{ marginTop: 16, fontSize: 16, fontWeight: 500 }}>Bitte warten...</div>
           </div>
@@ -631,8 +657,7 @@ export default function Index() {
             <InlineStack gap="300" align="space-between">
               <div style={{ flex: 1, minWidth: 280 }}>
                 <TextField
-                  label="Search"
-                  labelHidden
+                  label="Search" labelHidden
                   placeholder='Suchen... (z.B. "Nike" oder "sku:ABC123")'
                   value={search}
                   onChange={setSearch}
@@ -645,16 +670,10 @@ export default function Index() {
                 />
               </div>
               <InlineStack gap="200">
-                <Button
-                  variant="primary"
-                  onClick={() => navigate(buildUrl({ q: search.trim() || "", page: 1 }))}
-                >
+                <Button variant="primary" onClick={() => navigate(buildUrl({ q: search.trim() || "", page: 1 }))}>
                   Suchen
                 </Button>
-                <Button
-                  disabled={!q}
-                  onClick={() => navigate(buildUrl({ q: "", page: 1 }))}
-                >
+                <Button disabled={!q} onClick={() => navigate(buildUrl({ q: "", page: 1 }))}>
                   Zurücksetzen
                 </Button>
               </InlineStack>
@@ -667,26 +686,21 @@ export default function Index() {
               </Text>
             </div>
 
-            <div
-              style={{
-                marginTop: 16, display: "flex", gap: 16,
-                justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap",
-              }}
-            >
+            <div style={{
+              marginTop: 16, display: "flex", gap: 16,
+              justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap",
+            }}>
               <InlineStack gap="400" blockAlign="end">
-                {/* ── FILTER SELECT (label + logic fixed) ── */}
                 <Select
                   label="Filter"
                   options={[
-                    { label: "Kein Filter",                                   value: "none" },
-                    { label: "🔴 Nur Hauptlager <= Außenlager",               value: "lowMain" },
-                    { label: "🟠 Hauptlager minus Melde <= Außenlager",       value: "lowAfterReorder" },
+                    { label: "Kein Filter",                             value: "none" },
+                    { label: "🔴 Nur Hauptlager <= Außenlager",         value: "lowMain" },
+                    { label: "🟠 Hauptlager minus Melde <= Außenlager", value: "lowAfterReorder" },
                   ]}
                   value={filterType}
                   onChange={setFilterType}
                 />
-
-                {/* ── PER-PAGE SELECT (resets client filter on change) ── */}
                 <Select
                   label="Produkte pro Seite"
                   options={[
@@ -697,12 +711,11 @@ export default function Index() {
                   ]}
                   value={String(limit)}
                   onChange={(val) => {
-                    setFilterType("none"); // reset client filter so full page is visible
+                    setFilterType("none");
                     navigate(buildUrl({ q: q || "", page: 1, limit: val }));
                   }}
                 />
               </InlineStack>
-
               <div style={{ textAlign: "right" }}>
                 <Text as="p" variant="bodySm" tone="subdued">
                   {filterType === "none"
@@ -773,8 +786,6 @@ export default function Index() {
                     const isRedZone =
                       !hasRealVariants && currentHauptlager <= meldeQty && meldeQty > 0;
 
-                    const stockStatus = getStockStatus(qty);
-
                     return (
                       <Fragment key={node.id}>
                         <tr style={{ background: isRedZone ? "rgba(255,0,0,0.08)" : "transparent" }}>
@@ -818,7 +829,14 @@ export default function Index() {
                                 onStartEdit={() => startEdit("product", node.id, "warehouse2")}
                                 onCancelEdit={cancelEdit}
                                 onSave={(v) =>
-                                  transferToAussenlager(firstVariant?.id, qty, node.id, v)
+                                  // ── CHANGED: pass inventoryItemId as 2nd arg ──
+                                  transferToAussenlager(
+                                    firstVariant?.id,
+                                    firstVariant?.inventoryItem?.id,  // ← NEW
+                                    qty,
+                                    node.id,
+                                    v,
+                                  )
                                 }
                                 type="number"
                               />
@@ -867,10 +885,7 @@ export default function Index() {
                         {/* Variant sub-table */}
                         {hasRealVariants && isOpen && (
                           <tr>
-                            <td
-                              colSpan={8}
-                              style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}
-                            >
+                            <td colSpan={8} style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}>
                               <Text variant="headingSm" as="p">Varianten</Text>
                               <div style={{ marginTop: 10 }}>
                                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -904,9 +919,7 @@ export default function Index() {
                                             <InlineEditable
                                               value={String(vr.inventoryQuantity ?? "")}
                                               editing={isEditing("variant", vr.id, "inventory")}
-                                              onStartEdit={() =>
-                                                startEdit("variant", vr.id, "inventory")
-                                              }
+                                              onStartEdit={() => startEdit("variant", vr.id, "inventory")}
                                               onCancelEdit={cancelEdit}
                                               onSave={(v) =>
                                                 saveInventoryByInventoryItem(vr.inventoryItem?.id, v)
@@ -924,9 +937,7 @@ export default function Index() {
                                             <InlineEditable
                                               value={vr.melde?.value ?? ""}
                                               editing={isEditing("variant", vr.id, "melde")}
-                                              onStartEdit={() =>
-                                                startEdit("variant", vr.id, "melde")
-                                              }
+                                              onStartEdit={() => startEdit("variant", vr.id, "melde")}
                                               onCancelEdit={cancelEdit}
                                               onSave={(v) => saveMelde(vr.id, v)}
                                               type="number"
@@ -954,25 +965,17 @@ export default function Index() {
           <InlineStack align="space-between" gap="300">
             <Button
               disabled={currentPage <= 1}
-              onClick={() => {
-                cancelEdit();
-                navigate(buildUrl({ q: q || "", page: currentPage - 1 }));
-              }}
+              onClick={() => { cancelEdit(); navigate(buildUrl({ q: q || "", page: currentPage - 1 })); }}
             >
               Vorherige
             </Button>
-
             <Text as="p" variant="bodySm" tone="subdued">
               Seite {currentPage} von {totalPages} · {totalCount} Produkte · {limit} pro Seite
             </Text>
-
             <Button
               disabled={currentPage >= totalPages}
               variant="primary"
-              onClick={() => {
-                cancelEdit();
-                navigate(buildUrl({ q: q || "", page: currentPage + 1 }));
-              }}
+              onClick={() => { cancelEdit(); navigate(buildUrl({ q: q || "", page: currentPage + 1 })); }}
             >
               Nächste
             </Button>
