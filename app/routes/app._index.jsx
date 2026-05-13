@@ -63,12 +63,17 @@ const getStockStatus = (qty) => {
 
 /* =======================
    FILTER LOGIC
-======================= */
-const filterLowMainInventory = (hauptlagerQty, aussenlagerQty) =>
-  hauptlagerQty <= aussenlagerQty;
+   Both filters now use Shopify inventoryQuantity (shopifyQty) as the
+   stock value — NOT the hauptlager metafield.
 
-const filterLowAfterReorder = (hauptlagerQty, meldeQty, aussenlagerQty) =>
-  hauptlagerQty - meldeQty <= aussenlagerQty;
+   lowMain:        shopifyQty <= aussenlagerQty
+   lowAfterReorder: shopifyQty - meldeQty <= aussenlagerQty
+======================= */
+const filterLowMainInventory = (shopifyQty, aussenlagerQty) =>
+  shopifyQty <= aussenlagerQty;
+
+const filterLowAfterReorder = (shopifyQty, meldeQty, aussenlagerQty) =>
+  shopifyQty - meldeQty <= aussenlagerQty;
 
 const edgeTotalAussenlager = (edge) =>
   (edge.node.variants?.edges || []).reduce(
@@ -165,8 +170,6 @@ export const loader = async ({ request }) => {
   // AUTO-CORRECT HAUPTLAGER
   // For every variant where hauptlager metafield is set but <= 0,
   // fetch real on-hand (available + committed) and write it back.
-  // Runs on every page load / reload automatically.
-  // Also fixes direct Shopify admin metafield edits on next refresh.
   // ─────────────────────────────────────────────────────────────────────
   const correctionPromises = [];
 
@@ -174,24 +177,20 @@ export const loader = async ({ request }) => {
     for (const variantEdge of edge.node.variants.edges) {
       const variant = variantEdge.node;
 
-      // Only correct if hauptlager is explicitly set and is 0 or negative
       const rawHauptlager = variant.hauptlager?.value;
       if (rawHauptlager === null || rawHauptlager === undefined) continue;
 
       const hauptlagerNum = Number(rawHauptlager);
-      if (hauptlagerNum > 0) continue; // already fine
+      if (hauptlagerNum > 0) continue;
 
-      // Get available + committed from the already-fetched inventory levels
       const quantities =
         variant.inventoryItem?.inventoryLevels?.edges[0]?.node?.quantities || [];
       const available = quantities.find((q) => q.name === "available")?.quantity || 0;
       const committed = quantities.find((q) => q.name === "committed")?.quantity || 0;
       const onHand    = available + committed;
 
-      // Only update if on-hand is actually different from current hauptlager
       if (onHand === hauptlagerNum) continue;
 
-      // Mutate metafield + patch in-memory so the page renders correct value immediately
       correctionPromises.push(
         admin.graphql(
           `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
@@ -214,7 +213,6 @@ export const loader = async ({ request }) => {
           const mutData = await mutRes.json();
           const errors  = mutData.data?.metafieldsSet?.userErrors;
           if (!errors?.length) {
-            // Patch in-memory so loader returns fresh value without extra refetch
             variant.hauptlager = { value: String(onHand) };
           }
         }),
@@ -222,7 +220,6 @@ export const loader = async ({ request }) => {
     }
   }
 
-  // Run all corrections in parallel before responding
   if (correctionPromises.length > 0) {
     await Promise.all(correctionPromises);
   }
@@ -362,7 +359,6 @@ export const action = async ({ request }) => {
 
   // ─────────────────────────────────────────────────────────────────────
   // TRANSFER TO AUSSENLAGER
-  // If newHauptlager <= 0 → fetch real on-hand and use that instead
   // ─────────────────────────────────────────────────────────────────────
   if (type === "transfer-to-aussenlager") {
     const variantId        = form.get("variantId");
@@ -645,44 +641,53 @@ export default function Index() {
     const firstVariant    = variants[0];
     const hasRealVariants = variants.length > 1 || firstVariant?.title !== "Default Title";
 
+    // qty = total Shopify inventoryQuantity (shown as "Hauptlager" in the UI)
     const qty = hasRealVariants
       ? variants.reduce((sum, v) => sum + Number(v.inventoryQuantity || 0), 0)
       : Number(firstVariant?.inventoryQuantity ?? node.totalInventory ?? 0);
 
     const totalAussenlager = variants.reduce((sum, v) => sum + (Number(v.aussenlager?.value) || 0), 0);
-    const totalHauptlager  = variants.reduce((sum, v) => sum + (Number(v.hauptlager?.value)  || 0), 0);
 
-    return { variants, firstVariant, hasRealVariants, qty, totalAussenlager, totalHauptlager };
+    return { variants, firstVariant, hasRealVariants, qty, totalAussenlager };
   };
 
+  // ─────────────────────────────────────────────────────────────────────
+  // FILTER — uses Shopify inventoryQuantity (qty) as the stock value
+  //
+  // lowMain:         shopifyQty <= aussenlagerQty
+  // lowAfterReorder: shopifyQty - meldeQty <= aussenlagerQty
+  // ─────────────────────────────────────────────────────────────────────
   const filteredProducts = useMemo(() => {
     return products.filter(({ node }) => {
-      const { variants, firstVariant, hasRealVariants, totalAussenlager, totalHauptlager } =
+      const { variants, firstVariant, hasRealVariants, qty, totalAussenlager } =
         getRowInfo(node);
 
       if (totalAussenlager <= 0) return false;
       if (filterType === "none") return true;
 
       if (!hasRealVariants) {
-        const hauptlagerQty =
-          Number(firstVariant?.hauptlager?.value) ||
-          (Number(firstVariant?.inventoryQuantity) || 0) -
-            (Number(firstVariant?.aussenlager?.value) || 0);
-        const meldeQty       = Number(firstVariant?.melde?.value)       || 0;
+        // Single-variant: use inventoryQuantity directly as shopify stock
+        const shopifyQty   = Number(firstVariant?.inventoryQuantity) || 0;
         const aussenlagerQty = Number(firstVariant?.aussenlager?.value) || 0;
+        const meldeQty       = Number(firstVariant?.melde?.value)       || 0;
 
         if (filterType === "lowMain")
-          return filterLowMainInventory(hauptlagerQty, aussenlagerQty);
+          return filterLowMainInventory(shopifyQty, aussenlagerQty);
         if (filterType === "lowAfterReorder")
-          return filterLowAfterReorder(hauptlagerQty, meldeQty, aussenlagerQty);
+          return filterLowAfterReorder(shopifyQty, meldeQty, aussenlagerQty);
       } else {
+        // Multi-variant: sum of all variants' inventoryQuantity as shopify stock
+        const totalShopifyQty = variants.reduce(
+          (sum, v) => sum + (Number(v.inventoryQuantity) || 0), 0,
+        );
         const totalMelde = variants.reduce(
           (sum, v) => sum + (Number(v.melde?.value) || 0), 0,
         );
+
         if (filterType === "lowMain")
-          return filterLowMainInventory(totalHauptlager, totalAussenlager);
+          return filterLowMainInventory(totalShopifyQty, totalAussenlager);
         if (filterType === "lowAfterReorder")
-          return filterLowAfterReorder(totalHauptlager, totalMelde, totalAussenlager);
+          return filterLowAfterReorder(totalShopifyQty, totalMelde, totalAussenlager);
       }
       return true;
     });
@@ -750,9 +755,9 @@ export default function Index() {
                 <Select
                   label="Filter"
                   options={[
-                    { label: "Kein Filter",                             value: "none" },
-                    { label: "🔴 Nur Hauptlager <= Außenlager",         value: "lowMain" },
-                    { label: "🟠 Hauptlager minus Melde <= Außenlager", value: "lowAfterReorder" },
+                    { label: "Kein Filter",                                        value: "none" },
+                    { label: "🔴 Nur Hauptlager <= Außenlager",                    value: "lowMain" },
+                    { label: "🟠 Hauptlager minus Melde <= Außenlager",            value: "lowAfterReorder" },
                   ]}
                   value={filterType}
                   onChange={setFilterType}
@@ -783,14 +788,17 @@ export default function Index() {
             </div>
           </div>
 
-          {/* ── TABLE ── */}
+          {/* ── TABLE ──
+              Columns (7 total):
+              Artikel | Hersteller | Hauptlager | Außenlager | Außenlager Neu | Meldebestand | Aktion
+              "Hauptlager" here = Shopify inventoryQuantity
+          */}
           <div style={{ overflowX: "auto" }}>
             <table style={tableStyle}>
               <thead>
                 <tr>
                   <th style={thStyle}>Artikel</th>
                   <th style={thStyle}>Hersteller</th>
-                  <th style={thStyle}>Inventar</th>
                   <th style={thStyle}>Hauptlager</th>
                   <th style={thStyle}>Außenlager</th>
                   <th style={thStyle}>Außenlager Neu</th>
@@ -801,7 +809,7 @@ export default function Index() {
               <tbody>
                 {filteredProducts.length === 0 ? (
                   <tr>
-                    <td colSpan="8" style={{ ...tdStyle, textAlign: "center" }}>
+                    <td colSpan="7" style={{ ...tdStyle, textAlign: "center" }}>
                       <Text tone="subdued">Keine Produkte entsprechen diesem Filter</Text>
                     </td>
                   </tr>
@@ -809,7 +817,7 @@ export default function Index() {
                   filteredProducts.map(({ node }) => {
                     const {
                       variants, firstVariant, hasRealVariants,
-                      qty, totalAussenlager, totalHauptlager,
+                      qty, totalAussenlager,
                     } = getRowInfo(node);
 
                     const isOpen = openVariantProductId === node.id;
@@ -818,28 +826,15 @@ export default function Index() {
                       ? totalAussenlager > 0 ? String(totalAussenlager) : "—"
                       : firstVariant?.aussenlager?.value ?? "—";
 
-                    const hauptlagerValue = hasRealVariants
-                      ? totalHauptlager > 0 ? String(totalHauptlager) : "—"
-                      : firstVariant?.hauptlager?.value
-                        ? firstVariant.hauptlager.value
-                        : String(
-                            (Number(firstVariant?.inventoryQuantity) || 0) -
-                            (Number(firstVariant?.aussenlager?.value) || 0),
-                          );
-
-                    const currentHauptlager = hasRealVariants
-                      ? totalHauptlager
-                      : Number(firstVariant?.hauptlager?.value) ||
-                        (Number(firstVariant?.inventoryQuantity) || 0) -
-                          (Number(firstVariant?.aussenlager?.value) || 0);
-
                     const meldeValue = !hasRealVariants
                       ? firstVariant?.melde?.value ?? "—"
                       : "—";
-                    const meldeQty = Number(firstVariant?.melde?.value) || 0;
 
-                    const isRedZone =
-                      !hasRealVariants && currentHauptlager <= meldeQty && meldeQty > 0;
+                    // isRedZone: shopify stock <= melde threshold (consistent with filter logic)
+                    const meldeQty   = Number(firstVariant?.melde?.value) || 0;
+                    const shopifyQty = Number(firstVariant?.inventoryQuantity) || 0;
+                    const isRedZone  =
+                      !hasRealVariants && meldeQty > 0 && shopifyQty <= meldeQty;
 
                     return (
                       <Fragment key={node.id}>
@@ -855,11 +850,9 @@ export default function Index() {
                           <td style={{ ...tdStyle, minWidth: 180 }}>
                             <Text as="p">{node.vendor || "—"}</Text>
                           </td>
-                          <td style={{ ...tdStyle, minWidth: 90, textAlign: "center" }}>
+                          {/* Hauptlager = Shopify inventoryQuantity */}
+                          <td style={{ ...tdStyle, minWidth: 110, textAlign: "center" }}>
                             <Text as="p">{String(qty)}</Text>
-                          </td>
-                          <td style={{ ...tdStyle, minWidth: 110 }}>
-                            <Text as="p">{hauptlagerValue}</Text>
                           </td>
                           <td style={{ ...tdStyle, minWidth: 110 }}>
                             <Text as="p">{aussenlagerValue}</Text>
@@ -920,9 +913,14 @@ export default function Index() {
                           </td>
                         </tr>
 
+                        {/* ── VARIANT SUB-TABLE ──
+                            Columns (5 total):
+                            Artikel | Preis | Hauptlager | Außenlager | Meldebestand
+                            "Hauptlager" here = Shopify inventoryQuantity (editable)
+                        */}
                         {hasRealVariants && isOpen && (
                           <tr>
-                            <td colSpan={8} style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}>
+                            <td colSpan={7} style={{ ...tdStyle, background: "#f6f6f7", paddingLeft: 40 }}>
                               <Text variant="headingSm" as="p">Varianten</Text>
                               <div style={{ marginTop: 10 }}>
                                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -930,7 +928,6 @@ export default function Index() {
                                     <tr style={{ background: "#f6f6f7" }}>
                                       <th style={{ padding: 8, textAlign: "left" }}>Artikel</th>
                                       <th style={{ padding: 8, textAlign: "left" }}>Preis</th>
-                                      <th style={{ padding: 8, textAlign: "left" }}>Inventar</th>
                                       <th style={{ padding: 8, textAlign: "left" }}>Hauptlager</th>
                                       <th style={{ padding: 8, textAlign: "left" }}>Außenlager</th>
                                       <th style={{ padding: 8, textAlign: "left" }}>Meldebestand</th>
@@ -952,6 +949,7 @@ export default function Index() {
                                           <td style={{ padding: 8 }}>
                                             <Text as="p">{vr.price ? `€${vr.price}` : "—"}</Text>
                                           </td>
+                                          {/* Hauptlager = Shopify inventoryQuantity (editable) */}
                                           <td style={{ padding: 8 }}>
                                             <InlineEditable
                                               value={String(vr.inventoryQuantity ?? "")}
@@ -963,9 +961,6 @@ export default function Index() {
                                               }
                                               type="number"
                                             />
-                                          </td>
-                                          <td style={{ padding: 8 }}>
-                                            <Text as="p">{vr.hauptlager?.value ?? "—"}</Text>
                                           </td>
                                           <td style={{ padding: 8 }}>
                                             <Text as="p">{vr.aussenlager?.value ?? "—"}</Text>

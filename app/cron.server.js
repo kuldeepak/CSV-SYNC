@@ -200,22 +200,22 @@ pricingCustomer: metafield(namespace: "custom", key: "pricing_customer") {
         existing = {};
       }
       let existingPremium = {};
-try {
-  existingPremium = variant.pricingPremium?.value
-    ? JSON.parse(variant.pricingPremium.value)
-    : {};
-} catch {
-  existingPremium = {};
-}
+      try {
+        existingPremium = variant.pricingPremium?.value
+          ? JSON.parse(variant.pricingPremium.value)
+          : {};
+      } catch {
+        existingPremium = {};
+      }
 
-let existingCustomer = {};
-try {
-  existingCustomer = variant.pricingCustomer?.value
-    ? JSON.parse(variant.pricingCustomer.value)
-    : {};
-} catch {
-  existingCustomer = {};
-}
+      let existingCustomer = {};
+      try {
+        existingCustomer = variant.pricingCustomer?.value
+          ? JSON.parse(variant.pricingCustomer.value)
+          : {};
+      } catch {
+        existingCustomer = {};
+      }
 
       // 4️⃣ BUILD PATCH (NO STRUCTURE OVERWRITE)
       const newPricing = {
@@ -250,66 +250,66 @@ try {
       }
 
       const newPremiumPricing = {
-  ...existingPremium,
+        ...existingPremium,
 
-  base_price: existingPremium.base_price,
+        base_price: existingPremium.base_price,
 
-  base_price_google: csvPrice,
-  base_price_idealo: csvPrice,
-};
+        base_price_google: csvPrice,
+        base_price_idealo: csvPrice,
+      };
 
-if (existingPremium.tiered_price_google) {
-  newPremiumPricing.tiered_price_google = {
-    ...existingPremium.tiered_price_google,
-    1: csvPrice,
-  };
-}
+      if (existingPremium.tiered_price_google) {
+        newPremiumPricing.tiered_price_google = {
+          ...existingPremium.tiered_price_google,
+          1: csvPrice,
+        };
+      }
 
-if (existingPremium.tiered_price_idealo) {
-  newPremiumPricing.tiered_price_idealo = {
-    ...existingPremium.tiered_price_idealo,
-    1: csvPrice,
-  };
-}
+      if (existingPremium.tiered_price_idealo) {
+        newPremiumPricing.tiered_price_idealo = {
+          ...existingPremium.tiered_price_idealo,
+          1: csvPrice,
+        };
+      }
 
-if (existingPremium.tiered_price) {
-  newPremiumPricing.tiered_price = existingPremium.tiered_price;
-}
+      if (existingPremium.tiered_price) {
+        newPremiumPricing.tiered_price = existingPremium.tiered_price;
+      }
 
-const newCustomerPricing = {
-  ...existingCustomer,
+      const newCustomerPricing = {
+        ...existingCustomer,
 
-  base_price: existingCustomer.base_price,
+        base_price: existingCustomer.base_price,
 
-  base_price_google: csvPrice,
-  base_price_idealo: csvPrice,
-};
+        base_price_google: csvPrice,
+        base_price_idealo: csvPrice,
+      };
 
-if (existingCustomer.tiered_price_google) {
-  newCustomerPricing.tiered_price_google = {
-    ...existingCustomer.tiered_price_google,
-    1: csvPrice,
-  };
-}
+      if (existingCustomer.tiered_price_google) {
+        newCustomerPricing.tiered_price_google = {
+          ...existingCustomer.tiered_price_google,
+          1: csvPrice,
+        };
+      }
 
-if (existingCustomer.tiered_price_idealo) {
-  newCustomerPricing.tiered_price_idealo = {
-    ...existingCustomer.tiered_price_idealo,
-    1: csvPrice,
-  };
-}
+      if (existingCustomer.tiered_price_idealo) {
+        newCustomerPricing.tiered_price_idealo = {
+          ...existingCustomer.tiered_price_idealo,
+          1: csvPrice,
+        };
+      }
 
-if (existingCustomer.tiered_price) {
-  newCustomerPricing.tiered_price = existingCustomer.tiered_price;
-}
+      if (existingCustomer.tiered_price) {
+        newCustomerPricing.tiered_price = existingCustomer.tiered_price;
+      }
 
       console.log("💰 Updating SKU:", variant.sku);
 
       try {
-       await graphqlForShop(
-  shop,
-  token,
-  `mutation {
+        await graphqlForShop(
+          shop,
+          token,
+          `mutation {
     metafieldsSet(metafields: [
 
       {
@@ -318,8 +318,8 @@ if (existingCustomer.tiered_price) {
         key: "pricing"
         type: "json"
         value: "${JSON.stringify(newPricing)
-          .replace(/\\/g, "\\\\")
-          .replace(/"/g, '\\"')}"
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')}"
       },
 
       {
@@ -328,8 +328,8 @@ if (existingCustomer.tiered_price) {
         key: "pricing_premium"
         type: "json"
         value: "${JSON.stringify(newPremiumPricing)
-          .replace(/\\/g, "\\\\")
-          .replace(/"/g, '\\"')}"
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')}"
       },
 
       {
@@ -338,8 +338,8 @@ if (existingCustomer.tiered_price) {
         key: "pricing_customer"
         type: "json"
         value: "${JSON.stringify(newCustomerPricing)
-          .replace(/\\/g, "\\\\")
-          .replace(/"/g, '\\"')}"
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')}"
       }
 
     ]) {
@@ -349,7 +349,7 @@ if (existingCustomer.tiered_price) {
       }
     }
   }`
-);
+        );
 
         updated++;
         await new Promise((r) => setTimeout(r, 200));
